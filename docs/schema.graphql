@@ -1,0 +1,42 @@
+type Query {
+  dashboard(workspaceId: ID!): Dashboard!
+  portfolio(workspaceId: ID!): Portfolio!
+  exchangeCapabilities: [ExchangeCapability!]!
+  botPerformance(workspaceId: ID!, botId: ID!): BotPerformance!
+  systemHealth: SystemHealth!
+}
+
+type Dashboard {
+  totalPortfolioValue: Decimal!
+  unrealizedPnl: Decimal!
+  realizedPnl: Decimal!
+  dailyPnl: Decimal!
+  monthlyPnl: Decimal!
+  activeBots: Int!
+  runningTrades: Int!
+  exchangeStatus: [ExchangeStatus!]!
+  webhookActivity: [WebhookActivity!]!
+}
+
+type Portfolio {
+  balances: [Balance!]!
+  positions: [Position!]!
+  allocation: [Allocation!]!
+  performance: [PerformancePoint!]!
+}
+
+type Balance { asset: String!, free: Decimal!, locked: Decimal!, total: Decimal!, usdValue: Decimal }
+type Position { id: ID!, symbol: String!, side: PositionSide!, quantity: Decimal!, entryPrice: Decimal!, markPrice: Decimal!, unrealizedPnl: Decimal!, leverage: Int!, liquidationPrice: Decimal }
+type Allocation { asset: String!, value: Decimal!, percentage: Decimal! }
+type PerformancePoint { timestamp: DateTime!, value: Decimal!, realizedPnl: Decimal!, unrealizedPnl: Decimal! }
+type ExchangeCapability { exchange: Exchange!, marketType: MarketType!, hedgeMode: Boolean!, modifyOrder: Boolean!, batchOrders: Boolean!, trailingStop: Boolean!, fundingRate: Boolean!, openInterest: Boolean! }
+type ExchangeStatus { exchange: Exchange!, status: String!, latencyMs: Int, lastCheckedAt: DateTime! }
+type WebhookActivity { id: ID!, status: String!, receivedAt: DateTime!, action: String, symbol: String }
+type BotPerformance { botId: ID!, returnPct: Decimal!, realizedPnl: Decimal!, winRate: Decimal!, profitFactor: Decimal!, maxDrawdown: Decimal!, trades: Int! }
+type SystemHealth { status: String!, services: [ServiceHealth!]! }
+type ServiceHealth { name: String!, status: String!, latencyMs: Int, message: String }
+scalar Decimal
+scalar DateTime
+enum PositionSide { LONG SHORT BOTH }
+enum Exchange { BINANCE BYBIT OKX KUCOIN KRAKEN COINBASE MEXC HYPERLIQUID }
+enum MarketType { SPOT MARGIN USDT_FUTURES COIN_FUTURES PERPETUAL }

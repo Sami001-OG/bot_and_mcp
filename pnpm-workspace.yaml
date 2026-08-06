@@ -1,0 +1,14 @@
+packages:
+  - apps/*
+  - packages/*
+allowBuilds:
+  '@apollo/protobufjs': true
+  '@prisma/client': true
+  '@prisma/engines': true
+  '@scarf/scarf': false
+  bufferutil: true
+  ccxt: true
+  esbuild: true
+  msgpackr-extract: true
+  prisma: true
+  sharp: true

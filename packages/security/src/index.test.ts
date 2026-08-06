@@ -1,0 +1,2 @@
+import { describe, expect, it } from 'vitest'; import { EnvelopeEncryption, redact } from './index.js';
+describe('security',()=>{ it('binds ciphertext to context',()=>{const crypto=new EnvelopeEncryption(Buffer.alloc(32,7)); const encrypted=crypto.encrypt('secret','workspace:a'); expect(crypto.decrypt(encrypted,'workspace:a')).toBe('secret'); expect(()=>crypto.decrypt(encrypted,'workspace:b')).toThrow();}); it('redacts nested secrets',()=>expect(redact({apiKey:'x',nested:{token:'y',safe:'z'}})).toEqual({apiKey:'[REDACTED]',nested:{token:'[REDACTED]',safe:'z'}}));});

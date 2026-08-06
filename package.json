@@ -1,0 +1,32 @@
+{
+  "name": "crypto-trading-saas",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.18.0",
+  "engines": { "node": ">=22.0.0" },
+  "scripts": {
+    "with-env": "node --env-file=.env",
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test --concurrency=1",
+    "test:coverage": "turbo run test:coverage --concurrency=1",
+    "db:generate": "pnpm --filter @platform/database generate",
+    "db:validate": "pnpm --filter @platform/database validate",
+    "verify:binance": "node --env-file=.env scripts/verify-binance.mjs",
+    "verify:bybit": "node --env-file=.env scripts/verify-bybit.mjs",
+    "docs:check": "node scripts/check-docs.mjs",
+    "quality": "pnpm lint && pnpm typecheck && pnpm test && pnpm db:validate && pnpm docs:check && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@typescript-eslint/eslint-plugin": "^8.65.0",
+    "@typescript-eslint/parser": "^8.65.0",
+    "eslint": "^9.24.0",
+    "prettier": "^3.5.3",
+    "turbo": "^2.5.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.1"
+  }
+}

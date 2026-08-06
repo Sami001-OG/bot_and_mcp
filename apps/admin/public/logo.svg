@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 80" fill="none">
+  <defs>
+    <linearGradient id="g" x1="10" y1="8" x2="66" y2="70" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A991FF"/>
+      <stop offset=".5" stop-color="#7357FF"/>
+      <stop offset="1" stop-color="#32D8A0"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="72" height="72" rx="20" fill="#11131B"/>
+  <path d="M20 53V27l20 26 20-26v26" stroke="url(#g)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="20" cy="27" r="4.5" fill="#A991FF"/>
+  <circle cx="40" cy="53" r="4.5" fill="#7357FF"/>
+  <circle cx="60" cy="27" r="4.5" fill="#32D8A0"/>
+  <text x="94" y="47" fill="#F4F3FB" font-family="Inter,Segoe UI,sans-serif" font-size="34" font-weight="750" letter-spacing="-.8">NexusTrade</text>
+  <text x="96" y="66" fill="#8D91A5" font-family="Inter,Segoe UI,sans-serif" font-size="11" font-weight="600" letter-spacing="2.1">COMMAND CENTER</text>
+</svg>

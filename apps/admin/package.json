@@ -1,0 +1,6 @@
+{
+  "name": "@platform/admin", "version": "1.0.0", "private": true,
+  "scripts": { "build": "next build", "dev": "next dev -p 3001", "start": "next start -p 3001", "lint": "eslint app --max-warnings=0", "typecheck": "tsc --noEmit", "test": "vitest run --passWithNoTests", "test:coverage": "vitest run --passWithNoTests" },
+  "dependencies": { "next": "^15.3.0", "react": "^19.1.0", "react-dom": "^19.1.0", "lucide-react": "^0.487.0" },
+  "devDependencies": { "@types/react": "^19.1.0", "@types/react-dom": "^19.1.0" }
+}

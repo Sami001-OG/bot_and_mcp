@@ -1,0 +1,70 @@
+asyncapi: 3.0.0
+info:
+  title: NexusTrade Realtime API
+  version: 1.0.0
+  description: Authenticated workspace realtime streams with resumable sequences.
+servers:
+  production:
+    host: api.example.com
+    protocol: wss
+    pathname: /realtime
+channels:
+  portfolio:
+    address: portfolio
+    messages:
+      snapshot: { $ref: '#/components/messages/PortfolioSnapshot' }
+      delta: { $ref: '#/components/messages/PortfolioDelta' }
+  orders:
+    address: orders
+    messages:
+      orderUpdate: { $ref: '#/components/messages/OrderUpdate' }
+  positions:
+    address: positions
+    messages:
+      positionUpdate: { $ref: '#/components/messages/PositionUpdate' }
+  bots:
+    address: bots
+    messages:
+      botUpdate: { $ref: '#/components/messages/BotUpdate' }
+  webhooks:
+    address: webhooks
+    messages:
+      webhookUpdate: { $ref: '#/components/messages/WebhookUpdate' }
+operations:
+  receivePortfolio:
+    action: receive
+    channel: { $ref: '#/channels/portfolio' }
+  receiveOrders:
+    action: receive
+    channel: { $ref: '#/channels/orders' }
+  receivePositions:
+    action: receive
+    channel: { $ref: '#/channels/positions' }
+  receiveBots:
+    action: receive
+    channel: { $ref: '#/channels/bots' }
+components:
+  schemas:
+    Envelope:
+      type: object
+      required: [version, topic, sequence, timestamp, correlationId, data]
+      properties:
+        version: { const: 1 }
+        topic: { type: string }
+        sequence: { type: string }
+        timestamp: { type: string, format: date-time }
+        correlationId: { type: string }
+        data: {}
+  messages:
+    PortfolioSnapshot:
+      payload: { $ref: '#/components/schemas/Envelope' }
+    PortfolioDelta:
+      payload: { $ref: '#/components/schemas/Envelope' }
+    OrderUpdate:
+      payload: { $ref: '#/components/schemas/Envelope' }
+    PositionUpdate:
+      payload: { $ref: '#/components/schemas/Envelope' }
+    BotUpdate:
+      payload: { $ref: '#/components/schemas/Envelope' }
+    WebhookUpdate:
+      payload: { $ref: '#/components/schemas/Envelope' }

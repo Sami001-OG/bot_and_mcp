@@ -1,0 +1,174 @@
+openapi: 3.1.0
+info:
+  title: NexusTrade REST API
+  version: 1.0.0
+  description: Versioned command and query API for the multi-exchange trading platform.
+servers:
+  - url: https://api.example.com/api/v1
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      security: []
+      operationId: getHealth
+      responses:
+        '200': { description: Service health }
+  /portfolio/summary:
+    get:
+      operationId: getPortfolioSummary
+      responses:
+        '200':
+          description: Portfolio totals
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PortfolioSummary' }
+  /portfolio/positions:
+    get:
+      operationId: getPositions
+      responses:
+        '200': { description: Current reconciled positions }
+  /portfolio/orders:
+    get:
+      operationId: getOrders
+      responses:
+        '200': { description: Orders visible to the active workspace }
+  /orders:
+    post:
+      operationId: placeOrder
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderRequest' }
+      responses:
+        '200': { description: Order accepted into the durable execution queue }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /orders/{orderId}/cancel:
+    post:
+      operationId: cancelOrder
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202': { description: Cancellation queued }
+  /orders/emergency/close-all:
+    post:
+      operationId: closeAllPositions
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202': { description: Emergency close queued }
+  /bots:
+    get:
+      operationId: listBots
+      responses:
+        '200': { description: Bots in the active workspace }
+  /bots/{botId}/pause:
+    post:
+      operationId: pauseBot
+      parameters:
+        - { name: botId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Bot paused }
+  /bots/{botId}/resume:
+    post:
+      operationId: resumeBot
+      parameters:
+        - { name: botId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Bot resumed }
+  /webhooks/tradingview/{endpointId}:
+    post:
+      security: []
+      operationId: receiveTradingViewSignal
+      parameters:
+        - { name: endpointId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: x-webhook-signature, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TradingViewSignal' }
+      responses:
+        '202': { description: Signal durably accepted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 16, maxLength: 128 }
+  responses:
+    Problem:
+      description: RFC 9457 problem details
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    DecimalString: { type: string, pattern: '^-?\\d+(\\.\\d+)?$' }
+    PortfolioSummary:
+      type: object
+      required: [totalValue, unrealizedPnl, realizedPnl, dailyPnl, monthlyPnl, activeBots, runningTrades]
+      properties:
+        totalValue: { $ref: '#/components/schemas/DecimalString' }
+        unrealizedPnl: { $ref: '#/components/schemas/DecimalString' }
+        realizedPnl: { $ref: '#/components/schemas/DecimalString' }
+        dailyPnl: { $ref: '#/components/schemas/DecimalString' }
+        monthlyPnl: { $ref: '#/components/schemas/DecimalString' }
+        activeBots: { type: integer, minimum: 0 }
+        runningTrades: { type: integer, minimum: 0 }
+    OrderRequest:
+      type: object
+      required: [exchangeAccountId, exchange, marketType, symbol, side, type, quantity, clientOrderId]
+      properties:
+        exchangeAccountId: { type: string, format: uuid }
+        exchange: { enum: [binance, bybit, okx, kucoin, kraken, coinbase, mexc, hyperliquid] }
+        marketType: { enum: [SPOT, MARGIN, USDT_FUTURES, COIN_FUTURES, PERPETUAL] }
+        symbol: { type: string }
+        side: { enum: [BUY, SELL] }
+        positionSide: { enum: [LONG, SHORT, BOTH], default: BOTH }
+        type: { enum: [MARKET, LIMIT, STOP, STOP_MARKET, STOP_LIMIT, TAKE_PROFIT, TAKE_PROFIT_MARKET, TRAILING_STOP] }
+        quantity: { $ref: '#/components/schemas/DecimalString' }
+        price: { $ref: '#/components/schemas/DecimalString' }
+        stopPrice: { $ref: '#/components/schemas/DecimalString' }
+        callbackRate: { $ref: '#/components/schemas/DecimalString' }
+        reduceOnly: { type: boolean, default: false }
+        postOnly: { type: boolean, default: false }
+        timeInForce: { enum: [GTC, IOC, FOK], default: GTC }
+        leverage: { type: integer, minimum: 1, maximum: 200 }
+        marginMode: { enum: [CROSS, ISOLATED] }
+        clientOrderId: { type: string, minLength: 8, maxLength: 64 }
+    TradingViewSignal:
+      type: object
+      required: [exchange, symbol, action, size, nonce, timestamp]
+      properties:
+        exchange: { enum: [binance, bybit, okx, kucoin, kraken, coinbase, mexc, hyperliquid] }
+        symbol: { type: string }
+        action: { enum: [BUY, SELL, LONG, SHORT, CLOSE_LONG, CLOSE_SHORT, REVERSE, SET_LEVERAGE, MOVE_STOP, PARTIAL_EXIT] }
+        size: { $ref: '#/components/schemas/DecimalString' }
+        leverage: { type: integer, minimum: 1, maximum: 200 }
+        stop_loss: { $ref: '#/components/schemas/DecimalString' }
+        take_profit: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/DecimalString' } }
+        reduce_only: { type: boolean }
+        close_percentage: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        nonce: { type: string, minLength: 12 }
+        timestamp: { type: string, format: date-time }
+    Problem:
+      type: object
+      required: [type, title, status, detail, correlationId]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        correlationId: { type: string }
