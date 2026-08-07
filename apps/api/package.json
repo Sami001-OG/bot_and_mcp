@@ -23,6 +23,7 @@
     "@nestjs/swagger": "^11.1.2",
     "@nestjs/websockets": "^11.0.12",
     "@platform/auth": "workspace:*",
+    "@platform/commands": "workspace:*",
     "@platform/contracts": "workspace:*",
     "@platform/database": "workspace:*",
     "@platform/exchange-adapters": "workspace:*",

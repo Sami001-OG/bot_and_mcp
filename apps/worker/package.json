@@ -1,6 +1,6 @@
 {
   "name": "@platform/worker", "version": "1.0.0", "private": true, "type": "module",
   "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx watch src/main.ts", "start": "node dist/main.js", "lint": "eslint src --max-warnings=0", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run --passWithNoTests", "test:coverage": "vitest run --coverage --passWithNoTests" },
-  "dependencies": { "bullmq": "^5.46.1", "ioredis": "^5.6.0", "@platform/exchange-adapters": "workspace:*", "@platform/contracts": "workspace:*", "@platform/database": "workspace:*",     "@platform/exchange-core": "workspace:*", "@platform/risk-engine": "workspace:*", "@platform/security": "workspace:*", "@platform/trading-core": "workspace:*", "@platform/bot-engine": "workspace:*" },
+  "dependencies": { "bullmq": "^5.46.1", "ioredis": "^5.6.0", "@platform/exchange-adapters": "workspace:*", "@platform/contracts": "workspace:*", "@platform/commands": "workspace:*", "@platform/database": "workspace:*",     "@platform/exchange-core": "workspace:*", "@platform/risk-engine": "workspace:*", "@platform/security": "workspace:*", "@platform/trading-core": "workspace:*", "@platform/bot-engine": "workspace:*" },
   "devDependencies": { "tsx": "^4.19.3" }
 }

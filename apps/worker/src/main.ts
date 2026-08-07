@@ -5,16 +5,16 @@ import { Prisma, encryption, prisma, type ExchangeAccount, type ExchangeCredenti
 import { createExchangeAdapter } from '@platform/exchange-adapters';
 import { ExchangeError, type ExchangeAdapter, type ExchangeOrder } from '@platform/exchange-core';
 import { evaluateOrder, type RiskPolicy } from '@platform/risk-engine';
-import { OrderRequestSchema, TradingViewSignalSchema, WebhookBotConfigSchema, type Allocation, type ExchangeId, type MarketType, type PositionSide, type ResolvedOrderRequest, type TradingViewSignal, type WebhookBotConfig } from '@platform/contracts';
-import { sizeOrder } from '@platform/trading-core';
+import { OrderRequestSchema, TradingViewSignalSchema, WebhookBotConfigSchema, type Allocation, type ExchangeId, type PositionSide, type ResolvedOrderRequest, type TradingViewSignal, type WebhookBotConfig } from '@platform/contracts';
+import { sizeOrder, applyFill, type PositionSnapshot } from '@platform/trading-core';
 import { buildWebhookOrders } from '@platform/bot-engine';
+import { syncPositionsFromExchange } from '@platform/commands';
 
 const connection = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', { maxRetriesPerRequest: null });
 const ordersQueue = new Queue('orders', { connection });
 const reconciliationQueue = new Queue('reconciliation', { connection });
 
 const TERMINAL_STATES = ['FILLED', 'CANCELED', 'REJECTED', 'FAILED'] as const;
-const STALE_STATES = ['SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'CANCEL_PENDING'] as const;
 
 const defaultPolicy: RiskPolicy = { maxDailyLoss: '1000', maxWeeklyLoss: '3000', maxMonthlyLoss: '10000', maxDrawdownPercent: '20', maxConcurrentPositions: 10, maxExposure: '100000', maxLeverage: 20, maxRiskPerTrade: '500', maxPositionSize: '25000', consecutiveLossCooldown: 3, tradingEnabled: true };
 
@@ -50,10 +50,32 @@ async function filledQuantityOf(orderId: string): Promise<number> {
   return rows.reduce((sum, row) => sum + Number(row.quantity), 0);
 }
 
+async function updatePositionLedger(order: OrderIntent, quantity: Prisma.Decimal, price: Prisma.Decimal, fee: Prisma.Decimal): Promise<void> {
+  if (order.marketType === 'SPOT') return;
+  const existing = await prisma.position.findFirst({ where: { exchangeAccountId: order.exchangeAccountId, symbol: order.symbol, ...(order.positionSide === 'BOTH' ? {} : { side: order.positionSide }) } });
+  const base: PositionSnapshot = existing ? { side: existing.side, quantity: existing.quantity.toString(), averageEntryPrice: existing.averageEntryPrice.toString(), realizedPnl: existing.realizedPnl.toString() } : { side: 'BOTH', quantity: '0', averageEntryPrice: '0', realizedPnl: '0' };
+  const next = applyFill(base, order.side, quantity.toString(), price.toString());
+  const realizedPnl = new Prisma.Decimal(next.realizedPnl).sub(fee);
+  if (existing && existing.side !== next.side) {
+    const conflict = await prisma.position.findUnique({ where: { exchangeAccountId_symbol_side: { exchangeAccountId: order.exchangeAccountId, symbol: order.symbol, side: next.side } } });
+    if (conflict) await prisma.position.update({ where: { id: conflict.id }, data: { quantity: new Prisma.Decimal(next.quantity), averageEntryPrice: new Prisma.Decimal(next.averageEntryPrice), realizedPnl: new Prisma.Decimal(conflict.realizedPnl).add(realizedPnl) } });
+    await prisma.position.delete({ where: { id: existing.id } });
+    if (conflict) return;
+  }
+  await prisma.position.upsert({
+    where: { exchangeAccountId_symbol_side: { exchangeAccountId: order.exchangeAccountId, symbol: order.symbol, side: next.side } },
+    update: { quantity: new Prisma.Decimal(next.quantity), averageEntryPrice: new Prisma.Decimal(next.averageEntryPrice), realizedPnl },
+    create: { workspaceId: order.workspaceId, exchangeAccountId: order.exchangeAccountId, symbol: order.symbol, side: next.side, marginMode: order.marginMode ?? 'ISOLATED', quantity: new Prisma.Decimal(next.quantity), averageEntryPrice: new Prisma.Decimal(next.averageEntryPrice), markPrice: price, leverage: order.leverage ?? 1, unrealizedPnl: new Prisma.Decimal(0), realizedPnl },
+  });
+}
+
 async function recordExecution(order: OrderIntent, exchangeOrder: ExchangeOrder, fillFraction: number, recordedFilled: number): Promise<void> {
   const quantity = new Prisma.Decimal(Number(exchangeOrder.filledQuantity) * fillFraction);
   const price = new Prisma.Decimal(exchangeOrder.averagePrice ?? exchangeOrder.quantity);
-  await prisma.execution.create({ data: { orderIntentId: order.id, exchangeExecutionId: recordedFilled === 0 ? exchangeOrder.id : `${exchangeOrder.id}:${recordedFilled}`, quantity, price, fee: new Prisma.Decimal(0), feeAsset: null, executedAt: new Date() } });
+  const fee = exchangeOrder.fee ? new Prisma.Decimal(exchangeOrder.fee.cost).mul(fillFraction) : new Prisma.Decimal(0);
+  const feeAsset = exchangeOrder.fee?.asset ?? null;
+  await prisma.execution.create({ data: { orderIntentId: order.id, exchangeExecutionId: recordedFilled === 0 ? exchangeOrder.id : `${exchangeOrder.id}:${recordedFilled}`, quantity, price, fee, feeAsset, executedAt: new Date() } });
+  await updatePositionLedger(order, quantity, price, fee).catch((error) => console.error(JSON.stringify({ level: 'error', event: 'position-ledger', orderId: order.id, error: error instanceof Error ? error.message : String(error) })));
 }
 
 async function handleOrderError(order: OrderIntent, error: unknown, job: Job, maxRetries: number): Promise<OrderIntent['state']> {
@@ -78,7 +100,16 @@ function reconcileStatus(exchangeOrder: ExchangeOrder): { state: OrderIntent['st
 
 async function reconcileOrder(adapter: ExchangeAdapter, order: OrderIntent): Promise<{ status: ExchangeOrder['status']; changed: boolean; recordedDelta: number }> {
   if (!order.exchangeOrderId) throw new ExchangeError('NOT_ON_EXCHANGE', 'Order has no exchange order id', false);
-  const exchangeOrder = await adapter.getOrder(order.exchangeOrderId, order.symbol);
+  let exchangeOrder: ExchangeOrder;
+  try {
+    exchangeOrder = await adapter.getOrder(order.exchangeOrderId, order.symbol);
+  } catch (error) {
+    if (error instanceof ExchangeError && (error.code === 'OrderNotFound' || /order.*(not found|does not exist)/i.test(error.message))) {
+      await setState(order.id, 'CANCELED', 'NOT_FOUND_ON_EXCHANGE');
+      return { status: 'CANCELED', changed: order.state !== 'CANCELED', recordedDelta: 0 };
+    }
+    throw error;
+  }
   const recordedFilled = await filledQuantityOf(order.id);
   const filled = Number(exchangeOrder.filledQuantity ?? 0);
   const delta = filled - recordedFilled;
@@ -92,11 +123,41 @@ async function reconcileOrder(adapter: ExchangeAdapter, order: OrderIntent): Pro
   return { status: exchangeOrder.status, changed, recordedDelta: delta > 1e-9 ? delta : 0 };
 }
 
+async function recoverOrderByClientOrderId(adapter: ExchangeAdapter, order: OrderIntent): Promise<{ recovered: boolean; exchangeOrder?: ExchangeOrder }> {
+  let existing: ExchangeOrder | null;
+  try {
+    existing = await adapter.findOrderByClientOrderId(order.clientOrderId, order.symbol);
+  } catch (error) {
+    throw new ExchangeError('LOOKUP_FAILED', `Failed to look up order by clientOrderId: ${error instanceof Error ? error.message : String(error)}`, true);
+  }
+  if (!existing) return { recovered: false };
+  try {
+    await prisma.orderIntent.update({ where: { id: order.id }, data: { exchangeOrderId: existing.id } });
+    const recordedFilled = Number(existing.filledQuantity ?? 0);
+    if (recordedFilled > 0) await recordExecution(order, existing, 1, 0);
+    const target = reconcileStatus(existing);
+    await setState(order.id, target.state, target.rejectionReason);
+  } catch (error) {
+    throw new ExchangeError('DB_WRITE_FAILED', `Failed to persist recovered order: ${error instanceof Error ? error.message : String(error)}`, true);
+  }
+  return { recovered: true, exchangeOrder: existing };
+}
+
 async function executeOrder(job: Job<{ action: 'execute'; orderId: string }>): Promise<Record<string, unknown>> {
   const order = await prisma.orderIntent.findUniqueOrThrow({ where: { id: job.data.orderId }, include: { exchangeAccount: true } });
   if ((TERMINAL_STATES as readonly string[]).includes(order.state)) return { orderId: order.id, status: `ALREADY_${order.state}`, skipped: true };
   const account = order.exchangeAccount;
+  const orderWorkspace = await prisma.workspace.findUnique({ where: { id: order.workspaceId }, select: { liveTradingEnabled: true } });
+  if (!orderWorkspace?.liveTradingEnabled) {
+    await setState(order.id, 'REJECTED', 'LIVE_TRADING_DISABLED');
+    return { orderId: order.id, status: 'REJECTED', reason: 'Live trading is disabled for this workspace' };
+  }
+  if (!account.tradingEnabled) {
+    await setState(order.id, 'REJECTED', 'ACCOUNT_TRADING_DISABLED');
+    return { orderId: order.id, status: 'REJECTED', reason: 'Trading is disabled for this exchange account' };
+  }
   let adapter: ExchangeAdapter | undefined;
+  let submitted = false;
   try {
     const session = await connectToAccount(account);
     adapter = session.adapter;
@@ -104,7 +165,18 @@ async function executeOrder(job: Job<{ action: 'execute'; orderId: string }>): P
       const result = await reconcileOrder(adapter, order);
       return { orderId: order.id, exchangeOrderId: order.exchangeOrderId, status: result.status, reconciled: true, changed: result.changed };
     }
-    await setState(order.id, 'SUBMITTING');
+    if (order.state === 'SUBMITTING') {
+      const recovered = await recoverOrderByClientOrderId(adapter, order);
+      if (recovered.recovered && recovered.exchangeOrder) {
+        return { orderId: order.id, exchangeOrderId: recovered.exchangeOrder.id, status: recovered.exchangeOrder.status, recovered: true, filled: Number(recovered.exchangeOrder.filledQuantity ?? 0) };
+      }
+    }
+    try {
+      await setState(order.id, 'SUBMITTING');
+    } catch (error) {
+      throw new ExchangeError('DB_WRITE_FAILED', `Failed to persist SUBMITTING state: ${error instanceof Error ? error.message : String(error)}`, true);
+    }
+    submitted = true;
     let quantity = order.quantity.toString();
     if (order.allocation) {
       const price = order.price?.toString() ?? await adapter.getPrice(order.symbol);
@@ -130,16 +202,40 @@ async function executeOrder(job: Job<{ action: 'execute'; orderId: string }>): P
     }
     const request = OrderRequestSchema.parse({ exchangeAccountId: account.id, exchange: account.exchange.toLowerCase() as ExchangeId, marketType: account.marketType, symbol: order.symbol, side: order.side, positionSide: order.positionSide, type: order.orderType, quantity, price: order.price?.toString(), stopPrice: order.stopPrice?.toString(), reduceOnly: order.reduceOnly, postOnly: order.postOnly, clientOrderId: order.clientOrderId, idempotencyKey: order.idempotencyKey }) as ResolvedOrderRequest;
     const exchangeOrder = await adapter.placeOrder(request);
-    await prisma.orderIntent.update({ where: { id: order.id }, data: { exchangeOrderId: exchangeOrder.id } });
-    const recordedFilled = Number(exchangeOrder.filledQuantity ?? 0);
-    if (exchangeOrder.status === 'FILLED' || exchangeOrder.status === 'PARTIALLY_FILLED' || (exchangeOrder.status === 'NEW' && recordedFilled > 0)) {
-      await recordExecution(order, exchangeOrder, 1, 0);
+    try {
+      await prisma.orderIntent.update({ where: { id: order.id }, data: { exchangeOrderId: exchangeOrder.id } });
+    } catch (error) {
+      throw new ExchangeError('DB_WRITE_FAILED', `Failed to persist exchangeOrderId: ${error instanceof Error ? error.message : String(error)}`, true);
     }
-    await setState(order.id, exchangeOrder.status === 'FILLED' ? 'FILLED' : exchangeOrder.status === 'PARTIALLY_FILLED' || (exchangeOrder.status === 'NEW' && recordedFilled > 0) ? 'PARTIALLY_FILLED' : exchangeOrder.status === 'REJECTED' ? 'REJECTED' : exchangeOrder.status === 'CANCELED' ? 'CANCELED' : 'ACKNOWLEDGED', exchangeOrder.status === 'REJECTED' ? exchangeOrder.rawStatus : undefined);
-    return { orderId: order.id, exchangeOrderId: exchangeOrder.id, status: exchangeOrder.status, rawStatus: exchangeOrder.rawStatus, filled: recordedFilled };
+    let resolved: ExchangeOrder = exchangeOrder;
+    if (!['FILLED', 'PARTIALLY_FILLED', 'REJECTED', 'CANCELED'].includes(exchangeOrder.status)) {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        try { resolved = await adapter.getOrder(exchangeOrder.id, order.symbol); } catch { break; }
+        if (resolved.status === 'FILLED' || resolved.status === 'PARTIALLY_FILLED' || Number(resolved.filledQuantity ?? 0) > 0) break;
+      }
+    }
+    const recordedFilled = Number(resolved.filledQuantity ?? 0);
+    if (resolved.status === 'FILLED' || resolved.status === 'PARTIALLY_FILLED' || (resolved.status === 'NEW' && recordedFilled > 0)) {
+      try {
+        await recordExecution(order, resolved, 1, 0);
+      } catch (error) {
+        throw new ExchangeError('DB_WRITE_FAILED', `Failed to record execution: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    }
+    try {
+      await setState(order.id, resolved.status === 'FILLED' ? 'FILLED' : resolved.status === 'PARTIALLY_FILLED' || (resolved.status === 'NEW' && recordedFilled > 0) ? 'PARTIALLY_FILLED' : resolved.status === 'REJECTED' ? 'REJECTED' : resolved.status === 'CANCELED' ? 'CANCELED' : 'ACKNOWLEDGED', resolved.status === 'REJECTED' ? resolved.rawStatus : undefined);
+    } catch (error) {
+      throw new ExchangeError('DB_WRITE_FAILED', `Failed to persist final state: ${error instanceof Error ? error.message : String(error)}`, true);
+    }
+    return { orderId: order.id, exchangeOrderId: exchangeOrder.id, status: resolved.status, rawStatus: resolved.rawStatus, filled: recordedFilled };
   } catch (error) {
+    const exchangeError = error instanceof ExchangeError ? error : new ExchangeError('INTERNAL', error instanceof Error ? error.message : String(error), false);
     const finalState = await handleOrderError(order, error, job, 5);
-    return { orderId: order.id, status: finalState, error: error instanceof ExchangeError ? error.code : error instanceof Error ? error.message.slice(0, 200) : String(error) };
+    if (submitted) {
+      await reconciliationQueue.add('resync', { action: 'resync', orderId: order.id }, { jobId: `resync-${order.id}`, attempts: 2, removeOnComplete: true, removeOnFail: false }).catch(() => undefined);
+    }
+    return { orderId: order.id, status: finalState, error: exchangeError.code };
   } finally {
     await adapter?.disconnect().catch(() => undefined);
   }
@@ -191,9 +287,12 @@ async function closeAll(job: Job<{ action: 'close-all'; exchangeAccountId: strin
     let closed = 0;
     for (const position of positions) {
       const opposite: 'BUY' | 'SELL' = position.side === 'LONG' ? 'SELL' : 'BUY';
+      const idempotencyKey = `close-${account.id}-${position.symbol}-${Date.now()}`;
+      const clientOrderId = `close-${Date.now()}-${closed}`;
       try {
-        const closeOrder = await adapter.placeOrder({ exchangeAccountId: account.id, exchange: account.exchange.toLowerCase() as ExchangeId, marketType: account.marketType as MarketType, symbol: position.symbol, side: opposite, positionSide: 'BOTH', type: 'MARKET', quantity: position.quantity, reduceOnly: true, postOnly: false, timeInForce: 'GTC', clientOrderId: `close-${Date.now()}-${closed}`, idempotencyKey: `close-${account.id}-${position.symbol}-${Date.now()}` });
-        if (closeOrder.status === 'FILLED' || closeOrder.status === 'PARTIALLY_FILLED') closed += 1;
+        const { order } = await persistOrder({ symbol: position.symbol, side: opposite, positionSide: 'BOTH', type: 'MARKET', quantity: position.quantity, reduceOnly: true, postOnly: false, clientOrderId, idempotencyKey }, account, 'QUEUED');
+        await ordersQueue.add('execute', { action: 'execute', orderId: order.id }, { jobId: order.id, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+        closed += 1;
       } catch (error) {
         closeFailures.push(`${position.symbol}: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`);
       }
@@ -290,6 +389,10 @@ async function processWebhook(job: Job<{ deliveryId: string; endpointId: string;
   try {
     const endpoint = delivery.endpoint;
     const workspace = await prisma.workspace.findUniqueOrThrow({ where: { id: endpoint.workspaceId } });
+    if (!workspace.liveTradingEnabled) {
+      await prisma.webhookDelivery.update({ where: { id: deliveryId }, data: { status: 'FAILED', error: 'Live trading is disabled for this workspace', processedAt: new Date() } });
+      return { deliveryId, routed: 0, failed: 1, reason: 'LIVE_TRADING_DISABLED' };
+    }
     const policy = await loadPolicy(workspace.id);
     const parsed = TradingViewSignalSchema.parse(signal);
     const bots = await prisma.bot.findMany({ where: { workspaceId: workspace.id, type: 'WEBHOOK', status: 'ACTIVE' }, include: { exchangeAccount: true } });
@@ -310,7 +413,7 @@ async function processWebhook(job: Job<{ deliveryId: string; endpointId: string;
         title: `Bot ${bot.name} ${result.status === 'ERROR' ? 'errored' : result.orders.length > 0 ? `placed ${result.orders.length} order(s)` : result.skipped.length > 0 ? 'skipped orders' : 'ran'}`,
         message: `${account.exchange.toUpperCase()} ${account.marketType} · ${parsed.symbol} ${parsed.action}${result.status === 'ERROR' && result.error ? ` · ${result.error}` : ''}${result.price ? ` @ ${result.price}` : ''}`,
         payload: { botId: bot.id, runId: result.runId, action: parsed.action, symbol: parsed.symbol, orders: result.orders, skipped: result.skipped, notes: result.notes },
-        jobId: `notify:run:${result.runId}`,
+        jobId: `notify-run-${result.runId}`,
       });
     }
     await prisma.webhookDelivery.update({ where: { id: deliveryId }, data: { status: failed === 0 ? 'DELIVERED' : 'FAILED', error: failed > 0 ? `${failed} bot run(s) failed` : null, processedAt: new Date() } });
@@ -320,7 +423,7 @@ async function processWebhook(job: Job<{ deliveryId: string; endpointId: string;
       title: `Webhook delivery ${failed === 0 ? 'completed' : 'partially failed'}`,
       message: `${routed} bot(s) processed, ${failed} failed`,
       payload: { deliveryId, endpointId: endpoint.id, routed, failed },
-      jobId: `notify:delivery:${deliveryId}`,
+      jobId: `notify-delivery-${deliveryId}`,
     });
     return { deliveryId, routed, failed, bots: botResults };
   } catch (error) {
@@ -331,13 +434,23 @@ async function processWebhook(job: Job<{ deliveryId: string; endpointId: string;
 
 async function resyncOrder(job: Job<{ action: 'resync'; orderId: string }>): Promise<Record<string, unknown>> {
   const order = await prisma.orderIntent.findUniqueOrThrow({ where: { id: job.data.orderId }, include: { exchangeAccount: true } });
-  if ((TERMINAL_STATES as readonly string[]).includes(order.state)) return { orderId: order.id, status: order.state, changed: false };
+  if ((['FILLED', 'CANCELED', 'REJECTED'] as string[]).includes(order.state)) return { orderId: order.id, status: order.state, changed: false };
   let adapter: ExchangeAdapter | undefined;
   try {
     const session = await connectToAccount(order.exchangeAccount);
     adapter = session.adapter;
-    const result = await reconcileOrder(adapter, order);
-    return { orderId: order.id, ...result };
+    if (order.exchangeOrderId) {
+      const result = await reconcileOrder(adapter, order);
+      return { orderId: order.id, ...result };
+    }
+    if (order.state === 'SUBMITTING' || order.state === 'FAILED') {
+      const recovered = await recoverOrderByClientOrderId(adapter, order);
+      if (recovered.recovered && recovered.exchangeOrder) {
+        return { orderId: order.id, exchangeOrderId: recovered.exchangeOrder.id, status: recovered.exchangeOrder.status, reconciled: true, changed: true };
+      }
+      return { orderId: order.id, changed: false, note: 'no matching order on exchange by clientOrderId' };
+    }
+    return { orderId: order.id, changed: false, note: 'no exchange order id yet' };
   } catch (error) {
     if (error instanceof ExchangeError && error.code === 'NOT_ON_EXCHANGE') return { orderId: order.id, changed: false, note: 'no exchange order id yet' };
     throw error;
@@ -347,11 +460,25 @@ async function resyncOrder(job: Job<{ action: 'resync'; orderId: string }>): Pro
 }
 
 async function scanForStaleOrders(): Promise<{ scanned: number }> {
-  const stale = await prisma.orderIntent.findMany({ where: { state: { in: [...STALE_STATES] }, exchangeOrderId: { not: null } }, orderBy: { updatedAt: 'asc' }, take: 100, select: { id: true } });
+  const stale = await prisma.orderIntent.findMany({ where: { state: { in: ['SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'FAILED'] }, OR: [{ exchangeOrderId: { not: null } }, { state: 'SUBMITTING' }] }, orderBy: { updatedAt: 'asc' }, take: 100, select: { id: true } });
   for (const order of stale) {
-    await reconciliationQueue.add('resync', { action: 'resync', orderId: order.id }, { jobId: `resync:${order.id}`, attempts: 2, removeOnComplete: true, removeOnFail: false });
+    await reconciliationQueue.add('resync', { action: 'resync', orderId: order.id }, { jobId: `resync-${order.id}`, attempts: 2, removeOnComplete: true, removeOnFail: false });
   }
   return { scanned: stale.length };
+}
+
+async function syncPositions(): Promise<Array<Record<string, unknown>>> {
+  const accounts = await prisma.exchangeAccount.findMany({ where: { tradingEnabled: true, marketType: { not: 'SPOT' } } });
+  const results: Array<Record<string, unknown>> = [];
+  for (const account of accounts) {
+    try {
+      const result = await syncPositionsFromExchange(account);
+      results.push({ accountId: result.accountId, positions: result.positions.length });
+    } catch (error) {
+      results.push({ accountId: account.id, error: error instanceof ExchangeError ? error.code : error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return results;
 }
 
 const workers = [
@@ -363,6 +490,7 @@ const workers = [
   new Worker('webhooks', processWebhook, { connection, concurrency: 10 }),
   new Worker('reconciliation', (job) => {
     if (job.name === 'scan') return scanForStaleOrders();
+    if (job.name === 'sync-positions') return syncPositions();
     return resyncOrder(job as Job<{ action: 'resync'; orderId: string }>);
   }, { connection, concurrency: 5 }),
   new Worker('bots', async (job) => {
@@ -370,6 +498,8 @@ const workers = [
       const { botId, signal } = job.data as { botId: string; signal: TradingViewSignal };
       const bot = await prisma.bot.findFirst({ where: { id: botId, status: 'ACTIVE' }, include: { exchangeAccount: true } });
       if (!bot) return { ok: false, reason: 'bot not found or not active' };
+      const botWorkspace = await prisma.workspace.findUnique({ where: { id: bot.workspaceId }, select: { liveTradingEnabled: true } });
+      if (!botWorkspace?.liveTradingEnabled) return { ok: false, reason: 'live trading disabled for workspace' };
       const parsed = TradingViewSignalSchema.parse(signal);
       const policy = await loadPolicy(bot.workspaceId);
       const result = await runBotEvaluation(bot, WebhookBotConfigSchema.parse(bot.config), parsed, policy);
@@ -379,7 +509,7 @@ const workers = [
         title: `Bot ${bot.name} run ${result.status === 'ERROR' ? 'errored' : result.orders.length > 0 ? `placed ${result.orders.length} order(s)` : result.skipped.length > 0 ? 'skipped orders' : 'completed'}`,
         message: `${bot.exchangeAccount.exchange.toUpperCase()} ${bot.exchangeAccount.marketType} · ${parsed.symbol} ${parsed.action}`,
         payload: { botId: bot.id, runId: result.runId, action: parsed.action, symbol: parsed.symbol, orders: result.orders, skipped: result.skipped },
-        jobId: `notify:run:${result.runId}`,
+        jobId: `notify-run-${result.runId}`,
       });
       return { ok: result.status === 'STOPPED', runId: result.runId, orders: result.orders, skipped: result.skipped, notes: result.notes, error: result.error };
     }
@@ -395,6 +525,7 @@ for (const worker of workers) {
   worker.on('completed', (job) => console.log(JSON.stringify({ level: 'info', queue: worker.name, jobId: job.id, result: job.returnvalue })));
 }
 setInterval(() => { void scanForStaleOrders().then((result) => console.log(JSON.stringify({ level: 'info', queue: 'reconciliation', event: 'scan', scanned: result.scanned }))).catch((error) => console.error(JSON.stringify({ level: 'error', queue: 'reconciliation', event: 'scan', error: error instanceof Error ? error.message : String(error) }))); }, Number(process.env.RECONCILIATION_SCAN_MS ?? 30000)).unref();
+setInterval(() => { void reconciliationQueue.add('sync-positions', { action: 'sync-positions' }, { jobId: `sync-positions-${Date.now()}`, removeOnComplete: true }).catch((error) => console.error(JSON.stringify({ level: 'error', queue: 'reconciliation', event: 'sync-positions', error: error instanceof Error ? error.message : String(error) }))); }, Number(process.env.POSITION_SYNC_MS ?? 60000)).unref();
 async function shutdown(): Promise<void> { await Promise.all(workers.map((worker) => worker.close())); await ordersQueue.close(); await reconciliationQueue.close(); await connection.quit(); }
 process.on('SIGTERM', () => void shutdown()); process.on('SIGINT', () => void shutdown());
 console.log(JSON.stringify({ level: 'info', service: 'worker', queues: workers.map((worker) => worker.name), status: 'ready' }));

@@ -87,6 +87,9 @@ importers:
       '@platform/auth':
         specifier: workspace:*
         version: link:../../packages/auth
+      '@platform/commands':
+        specifier: workspace:*
+        version: link:../../packages/commands
       '@platform/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -198,6 +201,9 @@ importers:
       '@platform/bot-engine':
         specifier: workspace:*
         version: link:../../packages/bot-engine
+      '@platform/commands':
+        specifier: workspace:*
+        version: link:../../packages/commands
       '@platform/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -244,6 +250,39 @@ importers:
       '@platform/trading-core':
         specifier: workspace:*
         version: link:../trading-core
+
+  packages/commands:
+    dependencies:
+      '@platform/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@platform/database':
+        specifier: workspace:*
+        version: link:../database
+      '@platform/exchange-adapters':
+        specifier: workspace:*
+        version: link:../exchange-adapters
+      '@platform/exchange-core':
+        specifier: workspace:*
+        version: link:../exchange-core
+      '@platform/risk-engine':
+        specifier: workspace:*
+        version: link:../risk-engine
+      '@platform/security':
+        specifier: workspace:*
+        version: link:../security
+      '@platform/trading-core':
+        specifier: workspace:*
+        version: link:../trading-core
+      bullmq:
+        specifier: ^5.46.1
+        version: 5.81.2(supports-color@7.2.0)
+      ioredis:
+        specifier: ^5.6.0
+        version: 5.11.1(supports-color@7.2.0)
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
 
   packages/contracts:
     dependencies:

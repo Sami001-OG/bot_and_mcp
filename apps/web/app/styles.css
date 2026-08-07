@@ -146,9 +146,49 @@ label.checkbox input, .action-grid input { width: auto; accent-color: #7c5cff; }
 .action-field { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
 .action-field legend { font-size: 12px; color: var(--muted); padding: 0 6px; }
 .action-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-top: 9px; }
+.symbol-picker { display: grid; gap: 9px; }
+.symbol-picker > span { color: #c7c9d7; font-size: 13px; }
+.symbol-tools { display: grid; gap: 8px; }
+.symbol-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.symbol-actions button, .symbol-custom button { background: #1c1f2b; border: 1px solid var(--border); color: #c8cad6; border-radius: 8px; padding: 7px 11px; font-size: 12px; }
+.symbol-actions button:disabled, .symbol-custom button:disabled { opacity: .4; cursor: not-allowed; }
+.symbol-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; background: #0b0d13; padding: 6px; display: grid; gap: 2px; }
+.symbol-row { display: flex !important; gap: 9px; align-items: center; padding: 6px 8px; border-radius: 7px; color: #c7c9d7; font-size: 13px; }
+.symbol-row:hover { background: #181b26; }
+.symbol-row input { width: auto; accent-color: #7c5cff; }
+.symbol-row span { display: grid; gap: 1px; }
+.symbol-row em { color: var(--muted); font-size: 11px; font-style: normal; }
+.symbol-row.orphan { background: #7c5cff14; }
+.symbol-custom { display: flex; gap: 8px; }
+.symbol-custom input { flex: 1; }
+.symbol-picker input[type='hidden'] { display: none; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 .modal-actions .secondary { background: #1c1f2b; border: 1px solid var(--border); color: #c8cad6; border-radius: 8px; padding: 10px 14px; }
 .modal .form-row label, .modal .grid-row label { display: grid; }
 .modal .checkbox { margin-top: 2px; }
 @media (max-width: 900px) { .bot-layout { grid-template-columns: 1fr; } .action-grid { grid-template-columns: repeat(2, 1fr); } .form-row { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .row-actions { flex-wrap: wrap; } table { font-size: 12px; } }
+
+/* Dashboard */
+nav .nav-link { display: flex; align-items: center; gap: 9px; padding: 11px 14px; color: #a9acbb; border-radius: 9px; font-size: 14px; background: transparent; border: 0; text-align: left; text-decoration: none; }
+nav .nav-link.active, nav .nav-link:hover { background: #7457ff1c; color: #c7bbff; }
+.window-tabs { display: flex; align-items: center; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+.window-tabs button { background: #1c1f2b; border: 1px solid var(--border); color: #c8cad6; border-radius: 8px; padding: 7px 13px; font-size: 13px; }
+.window-tabs button.active { border-color: #6f50ff; color: #fff; background: #6f50ff2b; }
+.window-tabs .small { margin-left: auto; }
+.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--red); color: #fff; font-size: 11px; font-weight: 700; margin-left: 8px; vertical-align: middle; }
+.notification-list { display: grid; gap: 0; }
+.notification-item { padding: 13px 0; border-bottom: 1px solid var(--border); }
+.notification-item.unread { background: #7457ff0d; margin: 0 -10px; padding: 13px 10px; border-radius: 9px; border-bottom-color: transparent; }
+.notification-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.notification-head .icon-btn { margin-left: auto; }
+.notification-item .small { margin-top: 5px; }
+.notification-item em { display: block; margin-top: 5px; font-size: 11px; }
+.severity-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.severity-dot.info { background: var(--purple); }
+.severity-dot.success { background: var(--green); }
+.severity-dot.warning { background: var(--amber); }
+.severity-dot.error { background: var(--red); }
+.pnl { font-variant-numeric: tabular-nums; }
+.metrics .icon + p { margin-top: 0; }
+.metrics .icon { color: #a997ff; }

@@ -1,6 +1,6 @@
 'use client';
 
-import { Bot, CirclePlus, LogOut, Pause, Play, RefreshCw, Settings2, ShieldCheck, Square, X } from 'lucide-react';
+import { Bot, CirclePlus, LayoutDashboard, LogOut, Pause, Play, RefreshCw, Settings2, ShieldCheck, Square, X } from 'lucide-react';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { NexusLogo } from '../logo';
@@ -19,6 +19,7 @@ type BotConfig = {
 };
 
 type ExchangeAccount = { id: string; exchange: string; label: string; marketType: string; tradingEnabled: boolean; credentialStatus: string };
+type Market = { symbol: string; base: string; quote: string; type: string; active: boolean };
 type BotSummary = {
   id: string;
   name: string;
@@ -65,6 +66,85 @@ function formatConfig(config: BotConfig): string {
   return parts.join(' · ');
 }
 
+function SymbolPicker({ accounts, selected, onChange }: { accounts: ExchangeAccount[]; selected: string[]; onChange: (next: string[]) => void }) {
+  const [query, setQuery] = useState('');
+  const [markets, setMarkets] = useState<Market[] | null>(null);
+  const [custom, setCustom] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const session = loadSession();
+    if (!session) return;
+    Promise.all(
+      accounts.map((account) =>
+        apiFetch<{ markets: Market[] }>(`/exchange-accounts/${account.id}/markets`, session)
+          .then((data) => data.markets)
+          .catch(() => [] as Market[])
+      )
+    )
+      .then((lists) => {
+        if (cancelled) return;
+        const seen = new Set<string>();
+        const merged: Market[] = [];
+        for (const list of lists) for (const market of list) if (!seen.has(market.symbol)) { seen.add(market.symbol); merged.push(market); }
+        merged.sort((a, b) => a.symbol.localeCompare(b.symbol));
+        setMarkets(merged);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [accounts]);
+
+  const toggle = (symbol: string) => onChange(selected.includes(symbol) ? selected.filter((item) => item !== symbol) : [...selected, symbol]);
+  const queryUpper = query.trim().toUpperCase();
+  const known = new Set((markets ?? []).map((market) => market.symbol));
+  const matching = (markets ?? []).filter((market) => market.symbol.toUpperCase().includes(queryUpper));
+  const orphaned = selected.filter((symbol) => !known.has(symbol));
+  const addMatches = () => onChange([...selected, ...matching.map((market) => market.symbol).filter((symbol) => !selected.includes(symbol))]);
+  const addAll = () => onChange([...selected, ...(markets ?? []).map((market) => market.symbol).filter((symbol) => !selected.includes(symbol))]);
+  const addCustom = () => {
+    const trimmed = custom.trim().toUpperCase();
+    if (trimmed && !selected.includes(trimmed)) onChange([...selected, trimmed]);
+    setCustom('');
+  };
+
+  return (
+    <label className="symbol-picker">
+      <span>Symbols — {selected.length} selected {accounts.length > 1 ? `(from ${accounts.length} accounts)` : ''}</span>
+      <div className="symbol-tools">
+        <input className="symbol-search" onChange={(event) => setQuery(event.target.value)} placeholder="Search pairs (BTC, ETH, DOGE…)" type="search" value={query} />
+        <div className="symbol-actions">
+          <button disabled={!queryUpper} onClick={addMatches} type="button">Add all matches</button>
+          <button disabled={(markets ?? []).length === 0} onClick={addAll} type="button">Select all</button>
+          <button disabled={selected.length === 0} onClick={() => onChange([])} type="button">Clear</button>
+        </div>
+      </div>
+      <div className="symbol-list">
+        {!markets && <p className="muted small">Loading markets from your verified accounts…</p>}
+        {markets && markets.length === 0 && <p className="muted small">No markets returned by the exchange.</p>}
+        {markets && matching.length === 0 && queryUpper && <p className="muted small">No matching markets.</p>}
+        {orphaned.map((symbol) => (
+          <label className="symbol-row orphan" key={`custom-${symbol}`}>
+            <input checked onChange={() => toggle(symbol)} type="checkbox" />
+            <span><b>{symbol}</b><em>custom pair</em></span>
+          </label>
+        ))}
+        {matching.slice(0, 200).map((market) => (
+          <label className="symbol-row" key={market.symbol}>
+            <input checked={selected.includes(market.symbol)} onChange={() => toggle(market.symbol)} type="checkbox" />
+            <span><b>{market.symbol}</b><em>{market.base} · {market.quote}</em></span>
+          </label>
+        ))}
+        {matching.length > 200 && <p className="muted small">Showing first 200 matches — refine your search.</p>}
+      </div>
+      <div className="symbol-custom">
+        <input onChange={(event) => setCustom(event.target.value)} placeholder="Add custom pair not listed, e.g. BTCUSD" type="text" value={custom} />
+        <button disabled={!custom.trim()} onClick={addCustom} type="button">Add</button>
+      </div>
+      <input name="symbols" readOnly type="hidden" value={selected.join(', ')} />
+    </label>
+  );
+}
+
 export default function BotsConsole() {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [booting, setBooting] = useState(true);
@@ -76,6 +156,7 @@ export default function BotsConsole() {
   const [selected, setSelected] = useState<BotDetail | null>(null);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [symbols, setSymbols] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
   const [loading, setLoading] = useState(false);
@@ -147,11 +228,14 @@ export default function BotsConsole() {
 
   const openCreate = () => {
     setEditTarget(null);
+    setSymbols([]);
     setCreateOpen(true);
     setNotice(null);
   };
 
   const openEdit = (bot: BotSummary) => {
+    const configSymbols = bot.config?.symbols ?? [];
+    setSymbols(configSymbols);
     setEditTarget({ id: bot.id, name: bot.name, config: bot.config });
     setCreateOpen(true);
     setNotice(null);
@@ -261,6 +345,7 @@ export default function BotsConsole() {
           <span><b>NexusTrade</b><small>Bots console</small></span>
         </Link>
         <nav aria-label="Bot console navigation">
+          <Link className="nav-link" href="/dashboard"><LayoutDashboard size={15} /> Dashboard</Link>
           <button className="active" type="button">Bots</button>
         </nav>
         <div className="security user-card">
@@ -391,7 +476,7 @@ export default function BotsConsole() {
                   </label>
                 </>
               )}
-              <label>Symbols<input defaultValue={prefill?.symbols.join(', ') ?? ''} name="symbols" placeholder="BTC/USDT, ETH/USDT" required /></label>
+              <SymbolPicker accounts={accounts} onChange={setSymbols} selected={symbols} />
               <div className="form-row">
                 <label>Allocation mode<select defaultValue={prefill?.allocation?.mode ?? 'NONE'} name="allocationMode">{ALLOCATION_OPTIONS.map((mode) => <option key={mode} value={mode}>{mode === 'NONE' ? 'Use signal size' : mode}</option>)}</select></label>
                 <label>Amount / percent<input defaultValue={prefill?.allocation?.mode === 'FIXED_AMOUNT' ? prefill.allocation.amount : prefill?.allocation?.percent ?? ''} min="0.001" name="allocationValue" step="any" type="number" /></label>

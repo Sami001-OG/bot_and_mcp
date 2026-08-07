@@ -4,7 +4,9 @@ export type ExchangeCredentials = { apiKey: string; secret: string; passphrase?:
 export type ExchangeConnection = { connected: boolean; serverTime: string; permissions: string[]; accountMode?: string };
 export type Balance = { asset: string; free: string; locked: string; total: string; usdValue?: string };
 export type Position = { symbol: string; side: PositionSide; quantity: string; entryPrice: string; markPrice: string; unrealizedPnl: string; leverage: number; liquidationPrice?: string; marginMode: MarginMode };
-export type ExchangeOrder = { id: string; clientOrderId: string; symbol: string; status: 'NEW'|'PARTIALLY_FILLED'|'FILLED'|'CANCELED'|'REJECTED'|'EXPIRED'|'UNKNOWN'; side: 'BUY'|'SELL'; type: string; quantity: string; filledQuantity: string; averagePrice?: string; rawStatus: string; updatedAt: string };
+export type ExchangeFee = { cost: string; asset: string };
+export type MarketInfo = { symbol: string; base: string; quote: string; type: 'spot'|'swap'|'future'|'margin'|'delivery'|'option'|'perpetual'; active: boolean };
+export type ExchangeOrder = { id: string; clientOrderId: string; symbol: string; status: 'NEW'|'PARTIALLY_FILLED'|'FILLED'|'CANCELED'|'REJECTED'|'EXPIRED'|'UNKNOWN'; side: 'BUY'|'SELL'; type: string; quantity: string; filledQuantity: string; averagePrice?: string; fee?: ExchangeFee; rawStatus: string; updatedAt: string };
 export type Leverage = { symbol: string; leverage: number };
 export type AdapterCapabilities = {
   marketTypes: MarketType[];
@@ -27,8 +29,10 @@ export interface ExchangeAdapter {
   disconnect(): Promise<void>;
   getBalance(): Promise<Balance[]>;
   getPositions(): Promise<Position[]>;
+  getMarkets(): Promise<MarketInfo[]>;
   getOrders(symbol?: string): Promise<ExchangeOrder[]>;
   getOrder(orderId: string, symbol: string): Promise<ExchangeOrder>;
+  findOrderByClientOrderId(clientOrderId: string, symbol: string): Promise<ExchangeOrder | null>;
   getPrice(symbol: string): Promise<string>;
   placeOrder(order: OrderRequest): Promise<ExchangeOrder>;
   cancelOrder(orderId: string, symbol: string): Promise<ExchangeOrder>;

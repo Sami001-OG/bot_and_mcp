@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyFill, OrderStateMachine, sizeOrder, unrealizedPnl } from './index.js';
+import { applyFill, computeRealizedPnl, OrderStateMachine, sizeOrder, unrealizedPnl } from './index.js';
 describe('trading core', () => {
   it('enforces order transitions', () => { const machine = new OrderStateMachine(); machine.transition('VALIDATED'); machine.transition('RISK_APPROVED'); expect(machine.state).toBe('RISK_APPROVED'); expect(() => machine.transition('FILLED')).toThrow(); });
   it('calculates weighted entries and pnl without floating point loss', () => { const first = applyFill({ side: 'BOTH', quantity: '0', averageEntryPrice: '0', realizedPnl: '0' }, 'BUY', '1', '100'); const second = applyFill(first, 'BUY', '1', '120'); expect(second.averageEntryPrice).toBe('110'); expect(unrealizedPnl(second, '125')).toBe('30'); });
@@ -11,4 +11,9 @@ describe('trading core', () => {
   it('rejects below-minimum notional', () => { const result = sizeOrder({ allocation: { mode: 'FIXED_AMOUNT', amount: '1' }, marketType: 'SPOT', price: '100', equity: '1000', maxEquity: '1000' }); expect(result.ok).toBe(false); expect(result.reasons.join()).toContain('minimum'); });
   it('rejects leveraged margin above equity', () => { const result = sizeOrder({ allocation: { mode: 'FIXED_AMOUNT', amount: '5000' }, marketType: 'USDT_FUTURES', price: '100', equity: '1000', maxEquity: '1000', leverage: 5 }); expect(result.ok).toBe(true); expect(result.margin).toBe('1000.0000'); const over = sizeOrder({ allocation: { mode: 'FIXED_AMOUNT', amount: '10000' }, marketType: 'USDT_FUTURES', price: '100', equity: '1000', maxEquity: '1000', leverage: 5 }); expect(over.ok).toBe(false); expect(over.reasons.join(' ')).toContain('margin'); });
   it('rejects risk-percent without a stop price', () => { const result = sizeOrder({ allocation: { mode: 'RISK_PERCENT', percent: 1 }, marketType: 'SPOT', price: '100', equity: '1000', maxEquity: '1000' }); expect(result.ok).toBe(false); expect(result.reasons.join(' ')).toContain('stop price'); });
+  it('computes fifo realized pnl for a long round trip', () => { const realized = computeRealizedPnl([{ side: 'BUY', quantity: '1', price: '100' }, { side: 'SELL', quantity: '1', price: '120' }]); expect(realized).toBe('20'); });
+  it('computes fifo realized pnl for a short round trip', () => { const realized = computeRealizedPnl([{ side: 'SELL', quantity: '2', price: '100' }, { side: 'BUY', quantity: '2', price: '90' }]); expect(realized).toBe('20'); });
+  it('nets fees into realized pnl', () => { const realized = computeRealizedPnl([{ side: 'BUY', quantity: '1', price: '100', fee: '0.1' }, { side: 'SELL', quantity: '1', price: '120', fee: '0.12' }]); expect(realized).toBe('19.78'); });
+  it('matches oldest lots first on partial sells', () => { const realized = computeRealizedPnl([{ side: 'BUY', quantity: '1', price: '100' }, { side: 'BUY', quantity: '1', price: '120' }, { side: 'SELL', quantity: '1.5', price: '110' }]); expect(realized).toBe('5'); });
+  it('returns zero for fills that never close', () => { const realized = computeRealizedPnl([{ side: 'BUY', quantity: '2', price: '100' }, { side: 'BUY', quantity: '1', price: '90' }]); expect(realized).toBe('0'); });
 });

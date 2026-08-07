@@ -122,9 +122,12 @@ export default function Dashboard() {
       window.location.href = '/bots';
       return;
     }
+    if (item === 'Overview' || item === 'Portfolio' || item === 'Orders' || item === 'Positions') {
+      window.location.href = '/dashboard';
+      return;
+    }
     setActiveView(item);
-    if (item === 'Orders') setOrdersOpen(true);
-    else setNotice({ tone: 'info', message: `${item} view selected.` });
+    setNotice({ tone: 'info', message: `${item} view selected.` });
   };
 
   const cycleRange = () => {
@@ -144,8 +147,8 @@ export default function Dashboard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
         body: JSON.stringify({
-          exchangeAccountId: 'demo-binance',
-          exchange: 'binance',
+          exchangeAccountId: 'ac99fccd-4598-4a4a-92aa-5ce879d86e69',
+          exchange: 'bybit',
           marketType: 'USDT_FUTURES',
           symbol,
           side,

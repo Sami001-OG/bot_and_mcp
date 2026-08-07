@@ -37,6 +37,27 @@ export function unrealizedPnl(position: PositionSnapshot, markPrice: string): st
   const direction = position.side === 'LONG' ? 1 : -1;
   return new Decimal(markPrice).minus(position.averageEntryPrice).mul(position.quantity).mul(direction).toFixed();
 }
+export type FillRecord = { side: 'BUY'|'SELL'; quantity: string; price: string; fee?: string };
+export function computeRealizedPnl(fills: FillRecord[]): string {
+  const lots: Array<{ side: 'BUY'|'SELL'; quantity: Decimal; price: Decimal }> = [];
+  let realized = new Decimal(0);
+  for (const fill of fills) {
+    let remaining = new Decimal(fill.quantity);
+    const price = new Decimal(fill.price);
+    const closing = lots.filter((lot) => lot.side !== fill.side);
+    for (const lot of closing) {
+      if (remaining.isZero()) break;
+      const matched = Decimal.min(lot.quantity, remaining);
+      const direction = lot.side === 'BUY' ? 1 : -1;
+      realized = realized.add(price.minus(lot.price).mul(matched).mul(direction));
+      lot.quantity = lot.quantity.sub(matched);
+      remaining = remaining.sub(matched);
+    }
+    lots.push({ side: fill.side, quantity: remaining, price });
+  }
+  const fees = fills.reduce((sum, fill) => sum.add(new Decimal(fill.fee ?? '0')), new Decimal(0));
+  return realized.sub(fees).toFixed();
+}
 export function buildBracketOrders(entry: ResolvedOrderRequest, stopPrice: string, takeProfits: Array<{ price: string; percentage: string }>): OrderRequest[] {
   const totalPercentage = takeProfits.reduce((sum, item) => sum + Number(item.percentage), 0);
   if (totalPercentage !== 100) throw new Error('Take-profit percentages must total 100');
