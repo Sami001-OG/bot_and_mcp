@@ -17,6 +17,10 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22.22.0, cache: pnpm }
       - run: pnpm install --frozen-lockfile
+      - name: Materialize root .env (Prisma validate/generate read env from the file)
+        run: |
+          echo "DATABASE_URL=$DATABASE_URL" > .env
+          echo "REDIS_URL=$REDIS_URL" >> .env
       - run: pnpm db:generate
       - run: pnpm quality
       - uses: aquasecurity/trivy-action@master
