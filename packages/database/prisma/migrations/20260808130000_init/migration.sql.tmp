@@ -1,0 +1,3 @@
+-- Prisma schema init migration - generated from packages/database/prisma/schema.prisma
+-- Source: installed through 'prisma migrate' at container start on Render.
+-- Schema generated with prisma migrate diff --from-empty --to-schema-datamodel.
