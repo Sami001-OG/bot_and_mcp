@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import {
   Activity,
@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { getApiBaseUrl } from '../lib/session';
 import { NexusLogo } from './logo';
 
 const navigation = [
@@ -62,12 +63,12 @@ const exchanges = [
 ] as const;
 
 const positions = [
-  ['BTC/USDT', 'LONG 10×', '0.42 BTC', '$116,820', '+$1,248.20'],
-  ['ETH/USDT', 'SHORT 5×', '8.50 ETH', '$3,842', '+$429.80'],
-  ['SOL/USDT', 'LONG 3×', '120 SOL', '$181.40', '-$84.22'],
+  ['BTC/USDT', 'LONG 10Ã—', '0.42 BTC', '$116,820', '+$1,248.20'],
+  ['ETH/USDT', 'SHORT 5Ã—', '8.50 ETH', '$3,842', '+$429.80'],
+  ['SOL/USDT', 'LONG 3Ã—', '120 SOL', '$181.40', '-$84.22'],
 ] as const;
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000/api/v1';
+const API_BASE = getApiBaseUrl();
 
 function formatCurrency(value: string, prefix = ''): string {
   const amount = Number(value);
@@ -88,8 +89,8 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const [healthResponse, summaryResponse] = await Promise.all([
-        fetch(`${API_URL}/health`, { cache: 'no-store' }),
-        fetch(`${API_URL}/portfolio/summary`, { cache: 'no-store' }),
+        fetch(`${API_BASE}/health`, { cache: 'no-store' }),
+        fetch(`${API_BASE}/portfolio/summary`, { cache: 'no-store' }),
       ]);
       if (!healthResponse.ok || !summaryResponse.ok) throw new Error('The API returned an error');
       const nextSummary = (await summaryResponse.json()) as PortfolioSummary;
@@ -143,7 +144,7 @@ export default function Dashboard() {
     const quantity = String(form.get('quantity') ?? '0.01');
     const key = crypto.randomUUID();
     try {
-      const response = await fetch(`${API_URL}/orders`, {
+      const response = await fetch(`${API_BASE}/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
         body: JSON.stringify({
@@ -215,7 +216,7 @@ export default function Dashboard() {
             <p className="muted">All critical systems are operational.</p>
           </div>
           <button className={`live ${apiOnline ? '' : 'offline'}`} onClick={() => void refreshSummary()} type="button">
-            <span /> {loading ? 'CHECKING SERVICES' : apiOnline ? 'API CONNECTED' : 'DEMO DATA · RETRY'}
+            <span /> {loading ? 'CHECKING SERVICES' : apiOnline ? 'API CONNECTED' : 'DEMO DATA Â· RETRY'}
           </button>
         </header>
 

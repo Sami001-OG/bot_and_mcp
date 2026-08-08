@@ -112,7 +112,7 @@ app.post('/mcp', async (req, res) => {
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'mcp-server', time: new Date().toISOString() }));
 
-const port = Number(process.env.MCP_PORT ?? 4002);
+const port = Number(process.env.PORT ?? process.env.MCP_PORT ?? 4002);
 app.listen(port, '0.0.0.0', () => console.log(`MCP server ready on :${port}`));
 
 async function shutdown(): Promise<void> {

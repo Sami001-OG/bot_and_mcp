@@ -1,6 +1,19 @@
 'use client';
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000/api/v1';
+export function getApiBaseUrl(): string {
+  const explicit = process.env.NEXT_PUBLIC_API_URL;
+  if (explicit) return explicit;
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    if (host.endsWith('.onrender.com')) {
+      const label = host.split('.')[0] ?? '';
+      if (label.startsWith('trading-web-')) {
+        return `https://trading-api-${label.slice('trading-web-'.length)}.onrender.com/api/v1`;
+      }
+    }
+  }
+  return 'http://localhost:4000/api/v1';
+}
 
 const SESSION_KEY = 'nexus.session';
 
@@ -37,7 +50,7 @@ export function clearSession(): void {
 }
 
 export async function login(email: string, password: string): Promise<AuthSession> {
-  const response = await fetch(`${API_URL}/auth/login`, {
+  const response = await fetch(`${getApiBaseUrl()}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
@@ -72,7 +85,7 @@ export async function apiFetch<T>(
   const method = options.method ?? 'GET';
   const init: RequestInit = { method, headers, ...(method === 'GET' ? { cache: 'no-store' } : {}) };
   if (options.body !== undefined) init.body = JSON.stringify(options.body);
-  const response = await fetch(`${API_URL}${path}`, init);
+  const response = await fetch(`${getApiBaseUrl()}${path}`, init);
   if (!response.ok) throw new ApiHttpError(await unwrapError(response), response.status);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;

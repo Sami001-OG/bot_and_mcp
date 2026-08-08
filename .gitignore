@@ -7,6 +7,8 @@ coverage
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
 *.log
 packages/database/generated
 .turbo
