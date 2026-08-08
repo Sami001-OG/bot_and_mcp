@@ -1,6 +1,6 @@
 import ccxt, { type Exchange } from 'ccxt';
 import type { ExchangeId, MarginMode, MarketType, OrderRequest } from '@platform/contracts';
-import { ExchangeError, type AdapterCapabilities, type Balance, type ExchangeAdapter, type ExchangeConnection, type ExchangeCredentials, type ExchangeOrder, type Leverage, type MarketInfo, type Position } from '@platform/exchange-core';
+import { ExchangeError, type AdapterCapabilities, type Balance, type ExchangeAdapter, type ExchangeConnection, type ExchangeCredentials, type ExchangeOrder, type FundingRate, type Leverage, type MarketInfo, type OHLCV, type OpenInterest, type Position } from '@platform/exchange-core';
 
 const capabilities: Record<ExchangeId, AdapterCapabilities> = {
   binance: { marketTypes: ['SPOT','MARGIN','USDT_FUTURES','COIN_FUTURES'], hedgeMode: true, modifyOrder: false, batchOrders: true, trailingStop: true, openInterest: true, fundingRate: true },
@@ -118,8 +118,20 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
         if (!market || market.active === false) continue;
         if (String(market.type ?? '').toLowerCase() !== expected) continue;
         if (!market.base || !market.quote) continue;
-        result.push({ symbol: String(market.symbol ?? ''), base: String(market.base ?? ''), quote: String(market.quote ?? ''), type: String(market.type).toLowerCase() as MarketInfo['type'], active: true });
+        const precision = (market.precision as { amount?: number | string; price?: number | string } | undefined) ?? {};
+        const amountStep = precision.amount === undefined ? undefined : Number(precision.amount);
+        const priceStep = precision.price === undefined ? undefined : Number(precision.price);
+        const amountMin = (market.limits as { amount?: { min?: number | string } } | undefined)?.amount?.min;
+        const priceMin = (market.limits as { price?: { min?: number | string } } | undefined)?.price?.min;
+        result.push({
+          symbol: String(market.symbol ?? ''), base: String(market.base ?? ''), quote: String(market.quote ?? ''), type: String(market.type).toLowerCase() as MarketInfo['type'], active: true,
+          ...(amountStep !== undefined && Number.isFinite(amountStep) && amountStep > 0 ? { amountStep } : {}),
+          ...(priceStep !== undefined && Number.isFinite(priceStep) && priceStep > 0 ? { priceStep } : {}),
+          ...(amountMin !== undefined && Number.isFinite(Number(amountMin)) && Number(amountMin) > 0 ? { amountMin: Number(amountMin) } : {}),
+          ...(priceMin !== undefined && Number.isFinite(Number(priceMin)) && Number(priceMin) > 0 ? { priceMin: Number(priceMin) } : {})
+        });
       }
+      return result;
       return result;
     } catch (error) { throw this.normalize(error); }
   }
@@ -174,7 +186,49 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
     } else if (order.positionSide === 'LONG' || order.positionSide === 'SHORT') {
       params.positionSide = order.positionSide;
     }
-    if (order.stopPrice) params.stopPrice = order.stopPrice;
+    if (order.stopPrice) {
+      if (this.id === 'bybit' && this.marketType !== 'SPOT') {
+        const client = this.requireClient() as unknown as { privatePostV5OrderCreate: (request: Record<string, unknown>) => Promise<{ result?: { orderId?: string; orderLinkId?: string } }> };
+        const [base, quot] = order.symbol.split('/');
+        const exchangeSymbol = `${base?.toUpperCase()}${quot?.split(':')[0]?.toUpperCase()}`;
+        const reduceOnly = order.reduceOnly;
+        const positionSide = order.positionSide ?? (order.side.toLowerCase() === 'buy' ? 'LONG' : 'SHORT');
+        const isTakeProfit = order.type === 'TAKE_PROFIT' || order.type === 'TAKE_PROFIT_MARKET';
+        const triggerDirection = order.side.toLowerCase() === 'buy' ? (isTakeProfit ? 2 : 1) : (isTakeProfit ? 1 : 2);
+        const triggerRequest = {
+          category: 'linear',
+          symbol: exchangeSymbol,
+          side: order.side.toLowerCase() === 'buy' ? 'Buy' : 'Sell',
+          orderType: 'Market',
+          qty: String(order.quantity),
+          timeInForce: order.postOnly ? 'PostOnly' : 'GTC',
+          reduceOnly,
+          triggerPrice: String(order.stopPrice),
+          triggerDirection,
+          triggerBy: 'LastPrice',
+          positionIdx: positionSide === 'SHORT' ? 2 : 1,
+          ...(order.clientOrderId ? { orderLinkId: order.clientOrderId } : {})
+        };
+        const response = await client.privatePostV5OrderCreate(triggerRequest);
+        const result = response.result ?? {};
+        const created: ExchangeOrder = {
+          id: String(result.orderId ?? ''),
+          clientOrderId: order.clientOrderId ?? '',
+          symbol: order.symbol,
+          side: order.side.toLowerCase() as ExchangeOrder['side'],
+          type: order.type,
+          status: result.orderId ? 'NEW' : 'REJECTED',
+          quantity: String(order.quantity),
+          filledQuantity: '0',
+          rawStatus: result.orderId ? 'open' : 'rejected',
+          updatedAt: new Date().toISOString()
+        };
+        if (!result.orderId) throw this.normalize(new Error(`Bybit conditional order rejected: ${JSON.stringify(response)}`));
+        return created;
+      }
+      params.triggerPrice = order.stopPrice;
+      if (this.id === 'bybit') params.triggerDirection = order.side.toLowerCase() === 'buy' ? 'ascending' : 'descending';
+    }
     if (order.callbackRate) params.callbackRate = order.callbackRate;
     try { return this.mapOrder(await this.requireClient().createOrder(this.marketSymbol(order.symbol), this.mapType(order.type), order.side.toLowerCase(), Number(order.quantity), order.price ? Number(order.price) : undefined, params)); } catch (error) { throw this.normalize(error); }
   }
@@ -199,6 +253,32 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
     const client = this.requireClient();
     if (!client.has.setMarginMode) throw new ExchangeError('MARGIN_MODE_UNSUPPORTED', `${this.id} does not expose setMarginMode`, false);
     try { await client.setMarginMode(mode.toLowerCase(), this.marketSymbol(symbol)); return { symbol, mode }; } catch (error) { throw this.normalize(error); }
+  }
+  async getOHLCV(symbol: string, timeframe = '1h', limit = 100): Promise<OHLCV[]> {
+    const client = this.requireClient();
+    if (!client.has.fetchOHLCV) throw new ExchangeError('OHLCV_UNSUPPORTED', `${this.id} does not expose fetchOHLCV`, false);
+    try {
+      const candles = await client.fetchOHLCV(this.marketSymbol(symbol), timeframe as never, undefined, Math.min(Math.max(1, Number(limit) || 100), 500));
+      return candles.map(([timestamp, open, high, low, close, volume]) => ({ timestamp: new Date(Number(timestamp)).toISOString(), open: String(open), high: String(high), low: String(low), close: String(close), volume: String(volume) }));
+    } catch (error) { throw this.normalize(error); }
+  }
+  async getFundingRate(symbol: string): Promise<FundingRate | null> {
+    const client = this.requireClient();
+    if (!client.has.fetchFundingRate) return null;
+    try {
+      const rate = await client.fetchFundingRate(this.marketSymbol(symbol));
+      if (rate.fundingRate == null) return null;
+      return { symbol: this.bareSymbol(String(rate.symbol ?? symbol)), fundingRate: String(rate.fundingRate), ...(typeof rate.nextFundingTimestamp === 'number' ? { nextFundingTime: new Date(rate.nextFundingTimestamp).toISOString() } : {}) };
+    } catch (error) { throw this.normalize(error); }
+  }
+  async getOpenInterest(symbol: string): Promise<OpenInterest | null> {
+    const client = this.requireClient();
+    if (!client.has.fetchOpenInterest) return null;
+    try {
+      const openInterest = await client.fetchOpenInterest(this.marketSymbol(symbol));
+      if (openInterest.openInterestAmount == null) return null;
+      return { symbol: this.bareSymbol(String(openInterest.symbol ?? symbol)), openInterest: String(openInterest.openInterestAmount) };
+    } catch (error) { throw this.normalize(error); }
   }
   private requireClient(): Exchange { if (!this.client) throw new ExchangeError('NOT_CONNECTED', `${this.id} adapter is disconnected`, false); return this.client; }
   private defaultType(): string { return resolveDefaultType(this.id, this.marketType); }

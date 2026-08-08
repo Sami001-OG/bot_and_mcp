@@ -67,7 +67,38 @@ export function buildBracketOrders(entry: ResolvedOrderRequest, stopPrice: strin
   return [entry, stop, ...takes];
 }
 
-export type SizeInput = { allocation: Allocation; marketType: MarketType; price: string; equity: string; maxEquity: string; leverage?: number; stopPrice?: string };
+export type MarketPrecision = { amountStep?: number; amountMin?: number; priceStep?: number; priceMin?: number };
+
+function finiteStep(value: number | undefined): Decimal | null {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return null;
+  return new Decimal(value);
+}
+
+export function floorToStep(value: string, step: string | number | Decimal): string {
+  const divisor = step instanceof Decimal ? step : new Decimal(step);
+  if (divisor.isZero()) return value;
+  return new Decimal(value).div(divisor).floor().mul(divisor).toFixed();
+}
+
+export function snapToStep(value: string, step: string | number | Decimal): string {
+  const divisor = step instanceof Decimal ? step : new Decimal(step);
+  if (divisor.isZero()) return value;
+  return new Decimal(value).div(divisor).round().mul(divisor).toFixed();
+}
+
+export function alignAmount(quantity: string, precision: MarketPrecision | undefined): string {
+  const step = finiteStep(precision?.amountStep);
+  if (!step) return quantity;
+  return floorToStep(quantity, step);
+}
+
+export function alignPrice(price: string, precision: MarketPrecision | undefined): string {
+  const step = finiteStep(precision?.priceStep);
+  if (!step) return price;
+  return snapToStep(price, step);
+}
+
+export type SizeInput = { allocation: Allocation; marketType: MarketType; price: string; equity: string; maxEquity: string; leverage?: number; stopPrice?: string; precision?: MarketPrecision; skipMinimum?: boolean };
 export type SizeResult = { ok: boolean; reasons: string[]; quantity?: string; notional?: string; margin?: string; leverage: number };
 export function sizeOrder(input: SizeInput): SizeResult {
   const reasons: string[] = [];
@@ -97,6 +128,17 @@ export function sizeOrder(input: SizeInput): SizeResult {
   if (isLeveraged && margin.greaterThan(equity)) reasons.push('Order margin exceeds available equity');
   if (notional.lessThan(minNotional)) reasons.push(`Order value below minimum of $${minNotional.toFixed(0)} (${input.marketType})`);
   if (reasons.length > 0) return { ok: false, reasons, leverage };
-  const quantity = notional.div(price);
+  let quantity = notional.div(price);
+  const amountStep = finiteStep(input.precision?.amountStep);
+  if (amountStep && !amountStep.isZero()) {
+    quantity = quantity.div(amountStep).floor().mul(amountStep);
+    if (quantity.isZero() || quantity.isNaN()) reasons.push('Quantity rounds to zero at the exchange quantity step');
+  }
+  if (reasons.length > 0) return { ok: false, reasons, leverage };
+  const amountMin = input.precision?.amountMin;
+  if (!input.skipMinimum && amountMin !== undefined && Number.isFinite(amountMin) && amountMin > 0 && quantity.lessThan(amountMin)) {
+    reasons.push(`Quantity ${quantity.toFixed(8)} is below the exchange minimum of ${amountMin}`);
+    return { ok: false, reasons, leverage };
+  }
   return { ok: true, reasons: [], quantity: quantity.toFixed(8), notional: notional.toFixed(4), margin: margin.toFixed(4), leverage };
 }

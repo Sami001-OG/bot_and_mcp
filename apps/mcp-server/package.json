@@ -1,6 +1,17 @@
 {
   "name": "@platform/mcp-server", "version": "1.0.0", "private": true, "type": "module",
   "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx watch src/main.ts", "start": "node dist/main.js", "lint": "eslint src --max-warnings=0", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run --passWithNoTests", "test:coverage": "vitest run --coverage --passWithNoTests" },
-  "dependencies": { "@modelcontextprotocol/sdk": "^1.9.0", "@platform/contracts": "workspace:*", "express": "^5.1.0", "zod": "^3.24.2" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.9.0",
+    "@platform/commands": "workspace:*",
+    "@platform/contracts": "workspace:*",
+    "@platform/database": "workspace:*",
+    "@platform/exchange-core": "workspace:*",
+    "@platform/security": "workspace:*",
+    "bullmq": "^5.46.1",
+    "express": "^5.1.0",
+    "ioredis": "^5.6.0",
+    "zod": "^3.24.2"
+  },
   "devDependencies": { "@types/express": "^5.0.1", "tsx": "^4.19.3" }
 }

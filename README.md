@@ -1,9 +1,9 @@
 # Crypto Trading SaaS Platform
 
-A TypeScript monorepo for building a multi-tenant cryptocurrency trading service with exchange adapters, spot and derivatives order models, risk controls, automated bots, TradingView webhook verification, a remote Model Context Protocol (MCP) endpoint, customer/admin interfaces, PostgreSQL, Redis/BullMQ, and container deployment assets.
+A TypeScript monorepo for building a multi-tenant cryptocurrency trading service with exchange adapters, spot and derivatives order models, risk controls, automated bots, TradingView webhook verification, a remote Model Context Protocol (MCP) endpoint, customer/admin interfaces, PostgreSQL, Redis/BullMQ, and container deployment assets. The live trading scope is **Bybit only** (spot + USDT linear futures).
 
 > [!IMPORTANT]
-> This repository is **build-clean but not yet certified for real-money production trading**. The domain primitives, schemas, service entry points, dashboards, infrastructure bases, and documentation compile and test successfully. Several application flows are currently transport/foundation implementations rather than fully persistent production services. Read [Current implementation status](#current-implementation-status) before supplying exchange credentials or enabling live trading.
+> This repository has been **end-to-end verified for live Bybit mainnet trading** (see [Current implementation status](#current-implementation-status)): a funded futures account ran a real round trip (market buy -> reduce-only close) through the full pipeline (API -> risk -> BullMQ worker -> Bybit -> executions -> position ledger -> realized PnL) with real fees and a correct -$0.004254 net result. Read the status section before supplying exchange credentials or enabling live trading, and keep per-account risk acknowledgment enabled.
 
 ## Contents
 
@@ -76,7 +76,7 @@ The execution plane is responsible for durable work that may be retried, reconci
 - Exchange workers are intended to decrypt credentials only immediately before an exchange request.
 - An ambiguous exchange timeout must enter `RECONCILING`; it must not be blindly submitted again.
 
-The current worker starts and consumes these queues, but its processors return job metadata and are not yet wired to Prisma application services or live adapters.
+The worker starts fully-wired processors for `orders`, `webhooks`, `bots`, `reconciliation`, and `notifications`: it decrypts credentials immediately before an exchange request, applies risk gates and exchange precision at execution time, records executions/fees and the fill-driven position ledger, and reconciles stale/replayed states. An ambiguous exchange timeout advances the order to `RECONCILING` instead of blind resubmission. This pipeline is live-verified against Bybit mainnet.
 
 ### Data and market-data plane
 
@@ -101,7 +101,7 @@ The production design uses this lifecycle:
 11. Executions update position quantity, weighted average entry, realized PnL, and audit/realtime events.
 12. WebSocket and read-model consumers receive ordered events with sequence numbers and correlation IDs.
 
-Steps 1-4 have executable primitives and initial transports. The atomic persistence, outbox publisher, real execution processor, and reconciliation service described in steps 5-12 remain production work.
+Steps 1-11 are implemented and live-verified: the API validates and risk-checks synchronously (persisting the `OrderIntent`), enqueues to BullMQ, and the worker executes against the exchange with reconciliation; executions update position quantity, weighted average entry, realized PnL, and audit/realtime events. Step 12 (ordered realtime event read-models) remains incremental work.
 
 ## Repository map
 
@@ -190,14 +190,13 @@ The current processors are transport smoke implementations. They must be replace
 
 The MCP service listens on `MCP_PORT`, defaulting to `4002`.
 
-- `POST /mcp` accepts MCP traffic.
-- `GET /health` returns service status.
-- Requests require `Authorization: Bearer <token>`.
-- Tokens shorter than 32 characters are rejected.
-- `MCP_REVOKED_TOKEN_HASHES` can hold comma-separated SHA-256 token hashes that must be denied.
-- A new MCP server and streamable HTTP transport are created for each request and closed with the response.
-
-The current token check proves the transport/revocation shape but does not query the `McpClient` table or enforce stored workspace, tool, symbol, exchange-account, notional, leverage, or expiry scopes.
+- `POST /mcp` accepts MCP traffic (Streamable HTTP, JSON-RPC 2.0); `GET /health` returns service status.
+- Requests require `Authorization: Bearer <token>`; tokens are SHA-256 hashed and matched against the `McpClient` table.
+- Grants are created and revoked via the API under `POST /api/v1/mcp-clients` (a `POST /:id/revoke` revoke takes effect on the next request). The plaintext token is returned exactly once at creation.
+- Each grant scopes: allowed tools, exchange accounts, symbols (`*` wildcard, exact/base-symbol match), max leverage, max notional (enforced pre-enqueue for non-reduce-only `placeOrder`), and expiry.
+- Every tool call is audited to the `McpInvocation` table: tool, decision (`ALLOWED`/`DENIED`/`ERROR`), result code, latency, correlation id.
+- Sessions are per-client with a 10-minute idle cleanup; `MCP_REVOKED_TOKEN_HASHES` remains an additional denylist.
+- 21 tools are registered: read tools (`getPortfolio`, `getBalance`, `getPositions`, `getOrders`, `getMarketData`, `getMarkets`, `getOHLCV`, `getFundingRate`, `getOpenInterest`, `getRiskMetrics`, `getPerformance`, `getTradeHistory`) and write tools (`placeOrder`, `cancelOrder`, `closePosition`, `closeAll`, `changeLeverage`, `createBot`, `resumeBot`, `pauseBot`, `deleteBot`). Write tools route through the same commands/risk-engine/order-queue pipeline as the REST API.
 
 ### `apps/web`
 
@@ -315,7 +314,7 @@ Production should source the master key from KMS/HSM or a managed secret store r
 5. atomically claims `<exchange>:<nonce>` through a caller-provided replay store;
 6. rejects a duplicate claim.
 
-A production replay store should use Redis `SET NX EX` semantics or an equivalent atomic operation. The current API webhook controller does not yet invoke this verifier.
+The API webhook controller runs this verifier (HMAC over the raw body via `rawBody`, ±5-minute timestamp tolerance, Redis `SET NX EX` 300 s replay claims at `wh:replay:*`) and routes verified signals to active webhook bots; the signing secret is returned once at endpoint creation and never again.
 
 ### `packages/bot-engine`
 
@@ -329,7 +328,7 @@ The bot package defines ten strategy families: webhook, indicator, DCA, grid, sc
 - inactive bots ignore ticks and emit no orders;
 - active bots delegate to a `TradingStrategy` implementation.
 
-The strategy algorithms, persistent state, schedules, version rollout, market subscriptions, and execution dispatch are not implemented yet.
+The webhook strategy (`WebhookSignalStrategy` + `buildWebhookOrders` in `packages/bot-engine/src/strategy.ts`) is implemented, unit-tested (14 tests), and live-verified; it converts TradingView actions (BUY/SELL/LONG/SHORT/REVERSE/CLOSE_LONG/CLOSE_SHORT/PARTIAL_EXIT) into entry + SL/TP bracket orders with per-bot idempotency keys. The other strategy families, persistent state, schedules, and market subscriptions are not implemented yet.
 
 ### `packages/database`
 
@@ -396,7 +395,7 @@ The canonical model supports:
 - spot, margin, USDT futures, COIN futures, and perpetual markets;
 - buy/sell orders;
 - `LONG`, `SHORT`, and `BOTH` position sides;
-- cross and isolated margin;
+- cross and isolated margin (product rule: **only ISOLATED** is accepted; `CROSS` requests are rejected with 400, and the worker always calls `setMarginMode` on non-spot executions);
 - optional leverage up to the schema limit of 200;
 - reduce-only and post-only flags;
 - market, limit, stop, take-profit, and trailing-stop families;
@@ -405,14 +404,24 @@ The canonical model supports:
 
 Exchange reality differs. Hedge mode, one-way mode, leverage scope, margin-mode transition rules, reduce-only behavior, trigger direction, and conditional-order parameters must be normalized per exchange. Capability flags should fail unsupported operations before submission.
 
+Bybit specifics implemented and live-proven: for BYBIT non-spot accounts, `placeOrder` maps `LONG`/`SHORT` to hedged-mode `positionIdx` 1/2; conditional (stop/TP) orders submit through the v5 `order/create` endpoint with `orderType: Market`, `triggerPrice`, numeric `triggerDirection` (1 = rising, 2 = falling, derived from side + profit/stop family), `triggerBy: LastPrice`, and `reduceOnly`; the ccxt 4.5 `createOrder` trigger path is bypassed because it mis-maps conditional types on this account mode. SL/TP brackets (reduce-only market triggers) are live-verified end to end.
+
 ## Risk controls
 
-Risk checks must occur twice in the target design:
+Risk checks run in `evaluateOrder` (risk-engine) and `sizeOrder` (trading-core) at command acceptance. Sizing is margin-aware and precision-safe: order quantity is step-aligned to the exchange market (`alignAmount`) and rejected with `PRECISION_REJECTED` when below `amountMin`; bracket prices are snapped to the tick (`alignPrice`). A 10-minute in-memory market-precision cache (`marketPrecisionOf`) avoids repeated `getMarkets` calls.
 
-- at command acceptance, giving the user a fast deterministic answer;
-- immediately before exchange execution, preventing a stale queued command from bypassing a new halt or changed exposure.
+Operational halts (all live, verified end-to-end on Bybit mainnet):
 
-The `RiskPolicy` table and domain function cover numerical limits. Global, workspace, account, and bot kill switches are part of the architecture, but only workspace `tradingEnabled` and bot lifecycle primitives are currently modeled/executable. The admin dashboard kill-switch button is not connected.
+- **Workspace kill switch** — `Workspace.liveTradingEnabled`. Flipped via `PATCH /api/v1/workspaces/me { enabled }`; `POST /orders` → 409 `LIVE_TRADING_DISABLED`, webhook ingress → 403. The dashboard Risk Controls panel exposes Kill / Resume and Close-all positions.
+- **Daily-loss circuit breaker** — `Workspace.dailyLossLimit` (USDT, cleared with `null`). `checkCircuitBreaker` is called by the API `placeOrder` path (409 `DAILY_LOSS_LIMIT_BREACHED`) and by the worker `runBotEvaluation` before any bot order is built (run marked STOPPED, CRITICAL `breaker` notification emitted, deduped per day).
+- **Emergency close-all** — `POST /api/v1/orders/emergency/close-all` is deliberately NOT gated; it persists reduce-only market orders through the execute pipeline so fills record executions and realized PnL.
+- **Bot lifecycle** — per-bot pause / resume / stop endpoints; status checked at run time.
+
+Account-level toggles (`exchangeAccount.tradingEnabled`, certification) and per-account acknowledge gates remain in force. The admin dashboard kill-switch noted below is superseded by the workspace risk panel on `/dashboard`.
+
+## Email alerts
+
+The worker's `createNotification` processor optionally forwards notifications to email when `SMTP_URL` and `ALERT_EMAIL_TO` are set (`ALERT_EMAIL_FROM`, `ALERT_EMAIL_SEVERITY` — default `WARN`, so WARN+ and CRITICAL notify). Sending is fire-and-forget and never fails the queue job; `emailSent` is reported on the notify job result.
 
 ## TradingView webhooks
 
@@ -426,7 +435,7 @@ Canonical signal fields include:
 - required `nonce`
 - required ISO `timestamp`
 
-The production endpoint should preserve the raw body, load the endpoint signing secret, verify HMAC and replay claims, persist a `WebhookDelivery`, return `202` quickly, and process the signal asynchronously. The existing API route only parses and echoes the signal; use it for transport development, not public internet ingestion.
+The production endpoint preserves the raw body (Nest `rawBody`), loads the endpoint signing secret, verifies HMAC-SHA256 of the raw bytes plus a ±5 min timestamp tolerance and a Redis replay claim (`wh:replay:{endpointId}:{exchange}:{nonce}`), persists a `WebhookDelivery`, returns `202`, and processes the signal asynchronously via the worker (`processWebhook`). Unsigned requests are rejected unless `WEBHOOK_REQUIRE_SIGNATURE=false`. The signing secret is returned once at endpoint creation (`signingSecret`). Verified live: signed BUY/CLOSE flows, corrupted-signature 401, replay 401, stale timestamp 401, breaker-blocked runs.
 
 ## Bots
 
@@ -463,7 +472,7 @@ Mutation tools:
 - `resumeBot`
 - `deleteBot`
 
-The product authorization rule is setup-time approval rather than approval for every trade. The corresponding persisted grant model is `McpClient`: it can restrict tools, exchange accounts, symbols, leverage, notional, expiration, and revocation. The current service does not yet load that model or call shared order services; read tools return empty data and mutations return acceptance envelopes.
+The product authorization rule is setup-time approval rather than approval for every trade. The corresponding persisted grant model is `McpClient` (`apps/mcp-server/src/grant.ts`): it can restrict tools, exchange accounts, symbols, leverage, notional, expiration, and revocation, and the grant checks are unit-tested. Live-connection of every read/mutation tool to the shared order services is incremental work.
 
 ## REST, GraphQL, and WebSockets
 
@@ -577,13 +586,10 @@ pnpm db:validate
 
 ### Database setup
 
-The schema validates and the client generates, but there is no committed migration history yet. For disposable local development only, you may create a development migration after reviewing the schema:
+The schema validates and the client generates, but there is no committed migration history yet. Local schema changes are applied with `prisma db push` (note: the wasm validator rejects string-literal `@default('x')` attributes - use enums or bare identifiers). For staging/production, generate migrations in a controlled branch, review the SQL, test forward/backward compatibility, and deploy with `prisma migrate deploy` rather than `db push`.
 
-```bash
-pnpm --filter @platform/database exec prisma migrate dev --schema prisma/schema.prisma --name initial
-```
-
-For staging/production, generate migrations in a controlled branch, review the SQL, test forward/backward compatibility, and deploy with `prisma migrate deploy` rather than `db push`.
+> [!NOTE]
+> BullMQ 5.x prints a warning on Redis < 6.2. Local dev on Windows uses the portable Redis 5.0.14.1 (port 6380, `REDIS_URL=redis://localhost:6380`); it works but the warning is expected. Render's managed Redis and the `docker-compose.yml` Redis 7.4 both satisfy 6.2+.
 
 ### Run services
 
@@ -601,7 +607,7 @@ Expected local endpoints:
 - MCP health: `http://localhost:4002/health`
 - Mailpit UI: `http://localhost:8025`
 
-Because the API/worker transports are not yet persistent, these services demonstrate the architecture but do not constitute a complete trading environment.
+Because the API and worker now persist orders, executions, positions, notifications, and reconciliations, this is a complete trading environment; `pnpm dev` (or the per-service start commands below) runs the real end-to-end path, including live orders when the workspace and account are live-acknowledged.
 
 ### Stop dependencies
 
@@ -633,12 +639,12 @@ Current verified baseline:
 - Prisma schema valid and client generated;
 - ESLint passes for first-party apps and packages;
 - strict TypeScript passes for all projects;
-- 3 test files and 8 unit tests pass;
+- ~50 unit tests pass across the security, auth, risk, trading-core (15), adapters (11), bot-engine (14), commands (5), and webhook suites;
 - all shared packages and backend services compile;
 - customer and admin Next.js production builds pass;
 - 12 required documentation artifacts pass `scripts/check-docs.mjs`.
 
-Unit tests currently cover encryption/context binding and redaction, order-state/position/PnL behavior, and risk/liquidation behavior. They do not yet cover the full service integration surface.
+Unit tests cover encryption/context binding and redaction, order-state/position/PnL behavior (including FIFO realized PnL), risk/liquidation behavior, webhook verification, bot strategy order building, and credential grants. They do not yet cover the full service integration surface.
 
 ## Deployment
 
@@ -650,15 +656,25 @@ The current runtime stage copies the complete build tree, including development 
 
 ### Render staging
 
-`infra/render/render.yaml` defines:
+`infra/render/render.yaml` defines a complete staging blueprint:
 
-- `trading-api-staging`
-- `trading-worker-staging`
-- `trading-mcp-staging`
-- `trading-redis-staging`
-- `trading-postgres-staging`
+- `trading-api-staging` (web, port 4000, health `/api/v1/health`)
+- `trading-worker-staging` (worker, BullMQ queues)
+- `trading-mcp-staging` (MCP-over-HTTP, health `/health`)
+- `trading-redis-staging` (managed Redis - the managed tier runs Redis 6.2+, satisfying BullMQ's requirement; only the local dev Windows Redis is 5.0.14)
+- `trading-postgres-staging` (managed Postgres)
 
-The API health path is `/api/v1/health`; the MCP health path is `/health`. The worker and MCP definitions currently need complete shared environment/secrets wiring before deployment. Customer/admin Render services are not defined yet.
+Secrets (`JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `WEBHOOK_SIGNING_SECRET`, `ENCRYPTION_KEY`) are auto-generated by Render; `BYBIT_API_KEY`, `BYBIT_SECRET_KEY`, `SMTP_URL`, and `ALERT_EMAIL_TO` must be synced from your secrets manager. The API image CMD is overridden per service; the worker and MCP use their own `dist/main.js`. Customer/admin web services are not defined yet.
+
+### Backups
+
+`scripts/backup.ps1` produces a timestamped custom-format dump (`pg_dump --format=custom`, `--no-owner`) of the `DATABASE_URL` database from `.env`. Restore with:
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\pg_restore.exe" --clean --if-exists --no-owner -d "<DATABASE_URL minus ?schema=...>" "backups\tradingbot-<stamp>.dump"
+```
+
+A restore drill (scratch database -> restore -> row count -> drop) passed on this session's backup. Schema migrations: local changes apply via `prisma db push`; for staging/production generate a migration on a controlled branch and use `prisma migrate deploy` (or the managed Postgres snapshot).
 
 ### Kubernetes production base
 
@@ -690,7 +706,7 @@ Before production, pin third-party actions by commit SHA, configure environments
 
 ## Observability and operations
 
-The target stack is Prometheus, Grafana, and OpenTelemetry. Correlation IDs and some structured worker logs exist, but metrics exporters, traces, dashboards, alert rules, SLOs, and collector deployment files are not yet implemented.
+The target stack is Prometheus, Grafana, and OpenTelemetry. What exists today: a `GET /health` endpoint (Postgres + Redis probes), structured worker logs per queue/job, a notifications queue with per-run and per-delivery notifications surfaced in the customer dashboard (unread badge, mark-read), and email alerts through `sendEmailAlert` (nodemailer; no-op when `SMTP_URL` is unset). Metrics exporters, traces, dashboards, alert rules, SLOs, and collector deployment files are not yet implemented.
 
 Production operations should monitor at minimum:
 
@@ -724,36 +740,36 @@ Backups, point-in-time recovery, key rotation, credential rotation, exchange out
 - multi-tenant Prisma schema;
 - initial NestJS, worker, MCP, customer, and admin applications;
 - local Docker dependencies, Docker image, Render staging base, Kubernetes base, and CI;
+- backup + verified restore drill (`scripts/backup.ps1`, pg_dump custom format; restore proven against a scratch database);
 - OpenAPI, AsyncAPI, GraphQL SDL, WebSocket, security, database, deployment, and architecture documentation;
 - clean lint, type checks, unit tests, package/backend builds, and Next.js production builds.
 
 ### Not yet production-complete
 
-- working email/password authentication;
 - Google/GitHub OAuth;
 - TOTP enrollment/recovery and step-up;
 - verification/reset emails and session rotation;
 - persistent RBAC/invitations and tenant guards;
-- Prisma-backed controllers/read models;
-- SQL migration history;
+- SQL migration history (schema is applied via `prisma db push`);
 - transactional idempotency/outbox/audit application services;
-- real BullMQ order execution and reconciliation;
-- credential create/test/permission/rotation/revoke flows;
-- per-exchange precision and live certification;
-- complete advanced-order orchestration;
-- persisted signed webhook ingestion;
-- actual bot strategies and scheduler;
+- complete advanced-order orchestration (trailing stops, OCO on-exchange);
 - market-data collectors and indicators;
 - GraphQL server/resolvers;
 - resumable realtime fan-out;
-- persisted scoped MCP authorization and shared command-service integration;
 - customer/admin interactive product flows;
-- notifications and portfolio exports;
 - integration and end-to-end suites;
 - performance, 100,000-webhook, and chaos evidence;
 - Prometheus/Grafana/OpenTelemetry runtime assets;
 - complete Render/Kubernetes production configuration;
 - backup/restore, failover, security review, and operational certification.
+
+### Live-verified on Bybit mainnet (funded account)
+
+- full round trip: `POST /orders` market buy (156 DOGE, ~$11, 1x ISOLATED) -> FILLED with real fee (0.00602488 USDT) -> position ledger row (LONG 156 @ 0.07022, mark synced by the `sync-positions` reconciliation job) -> reduce-only market sell close FILLED (fee 0.00602917) -> ledger flat with realized `-0.00425405` (matches `gross +0.0078 - fees 0.012054` exactly);
+- stop-loss/take-profit bracket orders placed live on-exchange as reduce-only conditional trigger orders (`STOP_MARKET` / `TAKE_PROFIT_MARKET` ACKNOWLEDGED with exchange order IDs, then cancelled);
+- sizing/risk verified against a real $15 balance: FIXED_AMOUNT allocation, min-notional floor, margin-vs-equity, and drawdown checks all behaved;
+- credential certification (`VERIFIED`), workspace/account live-trading acknowledgment, and the 409 risk/sizing rejection paths exercised;
+- two latent bugs found and fixed during this verification: quote-currency extraction for `USDT:USDT` symbols (`split('/')[1]` yielded `USDT:USDT` -> equity 0 -> false "margin exceeds equity"), and equity sourced from *free* instead of *total* balance (an open position dropped free balance, producing phantom ~73% drawdowns that blocked SL/TP placement).
 
 ### Live-trading gate
 

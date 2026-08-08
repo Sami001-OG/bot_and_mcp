@@ -1,9 +1,10 @@
 import { OrderRequestSchema, type Allocation, type ExchangeId, type OrderRequest, type ResolvedOrderRequest } from '@platform/contracts';
 import { Prisma, encryption, prisma, type ExchangeAccount, type ExchangeCredential, type OrderIntent } from '@platform/database';
 import { createExchangeAdapter } from '@platform/exchange-adapters';
-import { ExchangeError, type ExchangeAdapter, type ExchangeConnection } from '@platform/exchange-core';
+import { ExchangeError, type ExchangeAdapter, type ExchangeConnection, type MarketInfo, type MarketPrecision } from '@platform/exchange-core';
 import { evaluateOrder, type RiskContext, type RiskPolicy } from '@platform/risk-engine';
-import { sizeOrder } from '@platform/trading-core';
+import { alignAmount, alignPrice, sizeOrder } from '@platform/trading-core';
+import { dailyRealizedPnl } from './ledger.js';
 
 export class CommandError extends Error {
   constructor(
@@ -76,21 +77,40 @@ export async function connectAccount(account: ExchangeAccount): Promise<{ adapte
   }
 }
 
-export async function resolveMarketSnapshot(account: ExchangeAccount, symbol: string, requestPrice?: string): Promise<{ price: string; equity: string; maxEquity: string }> {
+export async function resolveMarketSnapshot(account: ExchangeAccount, symbol: string, requestPrice?: string, includePrecision = true): Promise<{ price: string; equity: string; maxEquity: string; precision: MarketPrecision | null }> {
   const { adapter } = await connectAccount(account);
   try {
     const price = requestPrice ?? (await adapter.getPrice(symbol));
+    const precision = includePrecision ? await marketPrecisionOf(adapter, symbol) : null;
     const balances = await adapter.getBalance();
-    const quote = symbol.split('/')[1] ?? 'USDT';
-    const equity = balances.find((balance) => balance.asset === quote)?.free ?? '0';
+    const quote = (symbol.split('/')[1] ?? 'USDT').split(':')[0];
+    const balance = balances.find((balance) => balance.asset === quote);
+const equity = balance ? balance.total : '0';
     const previousEquity = account.equity === null ? undefined : account.equity.toString();
     const previousPeak = account.peakEquity === null ? undefined : account.peakEquity.toString();
     const peakEquity = previousPeak === undefined ? (previousEquity === undefined ? equity : previousEquity) : Prisma.Decimal.max(previousPeak, equity).toString();
     await prisma.exchangeAccount.update({ where: { id: account.id }, data: { equity: new Prisma.Decimal(equity), peakEquity: new Prisma.Decimal(peakEquity) } });
-    return { price, equity, maxEquity: peakEquity };
+    return { price, equity, maxEquity: peakEquity, precision };
   } finally {
     await adapter.disconnect().catch(() => undefined);
   }
+}
+
+const marketPrecisionCache = new Map<string, { expiresAt: number; precision: MarketPrecision | null }>();
+const MARKET_PRECISION_TTL_MS = 10 * 60_000;
+
+export async function marketPrecisionOf(adapter: ExchangeAdapter, symbol: string): Promise<MarketPrecision | null> {
+  const key = `${adapter.id}|${symbol.toUpperCase()}`;
+  const hit = marketPrecisionCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.precision;
+  let precision: MarketPrecision | null = null;
+  try {
+    const markets: MarketInfo[] = await adapter.getMarkets().catch(() => []);
+    const match = markets.find((market) => market.symbol.toUpperCase() === symbol.toUpperCase());
+    if (match) precision = { ...(match.amountStep !== undefined ? { amountStep: match.amountStep } : {}), ...(match.amountMin !== undefined ? { amountMin: match.amountMin } : {}), ...(match.priceStep !== undefined ? { priceStep: match.priceStep } : {}), ...(match.priceMin !== undefined ? { priceMin: match.priceMin } : {}) };
+  } catch { /* precision is advisory; order flow continues unaligned */ }
+  marketPrecisionCache.set(key, { expiresAt: Date.now() + MARKET_PRECISION_TTL_MS, precision });
+  return precision;
 }
 
 export type RiskContextInput = {
@@ -186,6 +206,7 @@ export type PlaceOrderInput = {
   request: OrderRequest;
   enqueue: (orderId: string) => Promise<void>;
   riskContext?: Partial<Pick<RiskContextInput, 'dailyPnl' | 'weeklyPnl' | 'monthlyPnl' | 'exposure' | 'openPositions' | 'consecutiveLosses' | 'enforceMinimumNotional'>>;
+  maxNotionalUsd?: string;
 };
 
 export type PlaceOrderResult =
@@ -194,8 +215,14 @@ export type PlaceOrderResult =
 
 export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult> {
   const { workspaceId, request, enqueue } = input;
-  const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { liveTradingEnabled: true } });
+  const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { liveTradingEnabled: true, dailyLossLimit: true } });
   if (!workspace?.liveTradingEnabled) throw new CommandError(409, 'LIVE_TRADING_DISABLED', 'Live trading is disabled for this workspace');
+  if (workspace.dailyLossLimit !== null) {
+    const dailyPnl = new Prisma.Decimal(await dailyRealizedPnl(workspaceId));
+    if (dailyPnl.lte(workspace.dailyLossLimit.negated())) {
+      throw new CommandError(409, 'DAILY_LOSS_LIMIT_BREACHED', `Daily loss limit reached (${dailyPnl.toFixed(4)} vs limit ${workspace.dailyLossLimit.toFixed(4)})`);
+    }
+  }
   const account = await prisma.exchangeAccount.findUnique({ where: { id: request.exchangeAccountId } });
   if (!account || account.workspaceId !== workspaceId) throw new CommandError(404, 'ACCOUNT_NOT_FOUND', 'Exchange account not found');
   if (!account.tradingEnabled) throw new CommandError(409, 'ACCOUNT_TRADING_DISABLED', 'Trading is disabled for this exchange account');
@@ -203,7 +230,7 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
   const isLeveraged = account.marketType !== 'SPOT';
   if (isLeveraged && request.marginMode && request.marginMode !== 'ISOLATED') throw new CommandError(400, 'CROSS_MARGIN_UNSUPPORTED', 'Only ISOLATED margin mode is supported');
   const marginMode: 'ISOLATED' | undefined = isLeveraged ? 'ISOLATED' : undefined;
-  let market: { price: string; equity: string; maxEquity: string };
+  let market: { price: string; equity: string; maxEquity: string; precision: MarketPrecision | null };
   try {
     market = await resolveMarketSnapshot(account, request.symbol, request.price);
   } catch (error) {
@@ -211,6 +238,7 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       details: error instanceof ExchangeError ? error.code : error instanceof Error ? error.message : String(error)
     });
   }
+  const precision = market.precision;
   let effective: ResolvedOrderRequest;
   if (request.allocation) {
     const allocation = request.allocation;
@@ -221,7 +249,9 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       equity: market.equity,
       maxEquity: market.maxEquity,
       ...(request.leverage == null ? {} : { leverage: request.leverage }),
-      ...(request.stopPrice ? { stopPrice: request.stopPrice } : {})
+      ...(request.stopPrice ? { stopPrice: request.stopPrice } : {}),
+      ...(precision ? { precision } : {}),
+      ...(request.reduceOnly ? { skipMinimum: true } : {})
     });
     if (!sized.ok || sized.quantity === undefined) {
       throw new CommandError(409, 'SIZING_REJECTED', 'Order rejected by sizing engine', { reasons: sized.reasons, allocation });
@@ -229,6 +259,21 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
     effective = { ...request, quantity: sized.quantity, leverage: sized.leverage };
   } else {
     effective = request as ResolvedOrderRequest;
+    if (precision && !request.reduceOnly) {
+      const amountMin = precision.amountMin;
+      if (amountMin !== undefined && Number.isFinite(amountMin) && amountMin > 0 && new Prisma.Decimal(effective.quantity).lessThan(new Prisma.Decimal(amountMin))) {
+        throw new CommandError(409, 'PRECISION_REJECTED', 'Order quantity is below the exchange minimum', { quantity: effective.quantity, amountMin, symbol: effective.symbol });
+      }
+    }
+    const alignedQuantity = alignAmount(effective.quantity, precision ?? undefined);
+    if (alignedQuantity !== effective.quantity) effective = { ...effective, quantity: alignedQuantity };
+  }
+  if (precision) {
+    const snappedPrice = effective.price === undefined ? undefined : alignPrice(effective.price, precision);
+    const snappedStop = effective.stopPrice === undefined ? undefined : alignPrice(effective.stopPrice, precision);
+    if (snappedPrice !== effective.price || snappedStop !== effective.stopPrice) {
+      effective = { ...effective, ...(snappedPrice === undefined ? {} : { price: snappedPrice }), ...(snappedStop === undefined ? {} : { stopPrice: snappedStop }) };
+    }
   }
   const policy = await loadPolicy(workspaceId);
   const risk = evaluateOrder(
@@ -238,6 +283,12 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
   );
   if (!risk.approved) {
     throw new CommandError(409, 'RISK_DENIED', 'Order rejected by risk engine', { risk, allocation: request.allocation });
+  }
+  if (input.maxNotionalUsd !== undefined) {
+    const notional = new Prisma.Decimal(effective.quantity).mul(new Prisma.Decimal(market.price));
+    if (notional.gt(new Prisma.Decimal(input.maxNotionalUsd))) {
+      throw new CommandError(409, 'MAX_NOTIONAL_EXCEEDED', 'Order notional exceeds the configured limit', { notional: notional.toFixed(4), maxNotionalUsd: new Prisma.Decimal(input.maxNotionalUsd).toFixed(4) });
+    }
   }
   const orderLike: PersistedOrderLike = {
     symbol: effective.symbol,

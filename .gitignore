@@ -16,3 +16,5 @@ Thumbs.db
 .workbuddy-ai/
 dump.rdb
 appendonlydir/
+# local database backups
+backups/

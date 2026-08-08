@@ -170,6 +170,7 @@ model Workspace {
   slug String @unique
   liveTradingEnabled Boolean @default(false)
   liveTradingAcknowledgedAt DateTime?
+  dailyLossLimit Decimal? @db.Decimal(20,8)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   members WorkspaceMember[]

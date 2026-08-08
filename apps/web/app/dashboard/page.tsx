@@ -1,6 +1,6 @@
 'use client';
 
-import { Bell, Bot, Boxes, Check, Home, Layers, LayoutDashboard, LogOut, RefreshCw, ShieldCheck, TrendingUp, X } from 'lucide-react';
+import { AlertTriangle, Bell, Bot, Boxes, Check, Home, Layers, LayoutDashboard, LogOut, Power, RefreshCw, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { NexusLogo } from '../logo';
@@ -61,6 +61,14 @@ type AppNotification = {
   createdAt: string;
 };
 
+type WorkspaceRisk = {
+  liveTradingEnabled: boolean;
+  liveTradingAcknowledgedAt: string | null;
+  dailyLossLimit: string | null;
+  dailyRealizedPnl: string;
+  circuitBreaker: boolean;
+};
+
 type Notice = { tone: 'success' | 'error' | 'info'; message: string } | null;
 
 const WINDOWS = [
@@ -107,6 +115,9 @@ export default function Dashboard() {
   const [executions, setExecutions] = useState<ExecutionRow[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unread, setUnread] = useState(0);
+  const [workspaceRisk, setWorkspaceRisk] = useState<WorkspaceRisk | null>(null);
+  const [limitInput, setLimitInput] = useState('');
+  const [riskBusy, setRiskBusy] = useState(false);
 
   useEffect(() => {
     const stored = loadSession();
@@ -131,6 +142,66 @@ export default function Dashboard() {
     const current = loadSession();
     if (current) await loadNotifications(current);
   }, [loadNotifications]);
+
+  const loadWorkspaceRisk = useCallback(async (activeSession: AuthSession) => {
+    try {
+      const risk = await apiFetch<WorkspaceRisk>('/workspaces/me', activeSession);
+      setWorkspaceRisk(risk);
+      setLimitInput(risk.dailyLossLimit ?? '');
+    } catch {
+      /* risk panel is non-critical */
+    }
+  }, []);
+
+  const toggleTrading = async (enabled: boolean) => {
+    if (!session || riskBusy) return;
+    if (!enabled && !window.confirm('Kill live trading for this workspace? New orders and bot runs will be blocked. Open positions are NOT closed automatically.')) return;
+    setRiskBusy(true);
+    try {
+      const updated = await apiFetch<{ liveTradingEnabled: boolean; dailyLossLimit: string | null }>('/workspaces/me', session, { method: 'PATCH', body: { enabled } });
+      setWorkspaceRisk((risk) => (risk ? { ...risk, liveTradingEnabled: updated.liveTradingEnabled, dailyLossLimit: updated.dailyLossLimit } : risk));
+      setNotice({ tone: 'success', message: enabled ? 'Live trading resumed.' : 'Live trading KILLED — new orders and bot runs are blocked.' });
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not toggle trading.' });
+    } finally {
+      setRiskBusy(false);
+    }
+  };
+
+  const saveLossLimit = async () => {
+    if (!session || riskBusy) return;
+    const value = limitInput.trim();
+    const dailyLossLimit = value === '' ? null : Number(value);
+    if (dailyLossLimit !== null && (!Number.isFinite(dailyLossLimit) || dailyLossLimit <= 0)) {
+      setNotice({ tone: 'error', message: 'Daily loss limit must be a positive number (empty clears it).' });
+      return;
+    }
+    setRiskBusy(true);
+    try {
+      const updated = await apiFetch<{ liveTradingEnabled: boolean; dailyLossLimit: string | null }>('/workspaces/me', session, { method: 'PATCH', body: { dailyLossLimit } });
+      setWorkspaceRisk((risk) => (risk ? { ...risk, dailyLossLimit: updated.dailyLossLimit } : risk));
+      setLimitInput(updated.dailyLossLimit ?? '');
+      setNotice({ tone: 'success', message: dailyLossLimit === null ? 'Daily loss limit cleared.' : `Daily loss limit set to $${dailyLossLimit}.` });
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not update loss limit.' });
+    } finally {
+      setRiskBusy(false);
+    }
+  };
+
+  const closeAllPositions = async () => {
+    if (!session || riskBusy) return;
+    if (!window.confirm('Place market reduce-only orders to close ALL positions across every exchange account? This cannot be undone by the system.')) return;
+    setRiskBusy(true);
+    try {
+      const result = await apiFetch<{ accepted: boolean; operation: string; exchangeAccountIds: string[] }>('/orders/emergency/close-all', session, { method: 'POST', body: {} });
+      setNotice({ tone: 'info', message: `Close-all submitted for ${result.exchangeAccountIds.length} account(s).` });
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not submit close-all.' });
+    } finally {
+      setRiskBusy(false);
+    }
+  };
 
   const loadAll = useCallback(async (active: AuthSession | null, hours: number | null) => {
     const current = active ?? loadSession();
@@ -161,7 +232,8 @@ export default function Dashboard() {
     if (!session) return;
     void loadAll(session, windowHours);
     void reloadNotifications();
-  }, [session, windowHours, loadAll, reloadNotifications]);
+    void loadWorkspaceRisk(session);
+  }, [session, windowHours, loadAll, reloadNotifications, loadWorkspaceRisk]);
 
   const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -272,6 +344,36 @@ export default function Dashboard() {
             <button aria-label="Dismiss notification" onClick={() => setNotice(null)} type="button"><X size={16} /></button>
           </div>
         )}
+
+        <div className="risk-card">
+          <div className="risk-summary">
+            <div className="risk-icon"><AlertTriangle size={18} /></div>
+            <div>
+              <p>Risk controls</p>
+              <h3>
+                <span className={`status-label ${workspaceRisk?.liveTradingEnabled ? 'ok' : 'bad'}`}>{workspaceRisk?.liveTradingEnabled ? 'TRADING LIVE' : 'TRADING KILLED'}</span>
+                {workspaceRisk && !workspaceRisk.circuitBreaker && <span className="status-label bad">BREAKER TRIPPED</span>}
+              </h3>
+              <small className="muted">
+                Daily realized: <b className={workspaceRisk && Number(workspaceRisk.dailyRealizedPnl) < 0 ? 'loss' : 'profit'}>{formatPnl(workspaceRisk?.dailyRealizedPnl ?? '0')}</b>
+                {' · '}Limit: {workspaceRisk?.dailyLossLimit ? `$${formatNumber(workspaceRisk.dailyLossLimit)}` : 'off'}
+              </small>
+            </div>
+          </div>
+          <div className="risk-actions">
+            {workspaceRisk?.liveTradingEnabled ? (
+              <button className="danger" disabled={riskBusy} onClick={() => void toggleTrading(false)} type="button"><Power size={14} /> Kill trading</button>
+            ) : (
+              <button className="primary" disabled={riskBusy} onClick={() => void toggleTrading(true)} type="button"><Power size={14} /> Resume trading</button>
+            )}
+            <button className="secondary" disabled={riskBusy} onClick={() => void closeAllPositions()} type="button"><Layers size={14} /> Close all positions</button>
+            <label className="limit-row">
+              <span className="muted small">Daily loss limit USDT</span>
+              <input onChange={(event) => setLimitInput(event.target.value)} placeholder="e.g. 50 (empty = off)" type="number" value={limitInput} />
+              <button className="secondary" disabled={riskBusy} onClick={() => void saveLossLimit()} type="button">Set</button>
+            </label>
+          </div>
+        </div>
 
         <div className="window-tabs" role="tablist" aria-label="PnL window">
           {WINDOWS.map((window) => (

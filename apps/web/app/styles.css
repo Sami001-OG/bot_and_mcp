@@ -85,7 +85,19 @@ td { padding: 14px 6px; border-bottom: 1px solid var(--border); white-space: now
 .modal form { display: grid; gap: 15px; margin-top: 20px; }
 .modal label { display: grid; gap: 7px; color: #c7c9d7; font-size: 13px; }
 .modal input, .modal select { width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #0b0d13; color: var(--text); padding: 11px 12px; }
+.risk-card { display: flex; justify-content: space-between; align-items: center; gap: 18px; background: #10121a; border: 1px solid #3a3265; border-radius: 14px; padding: 16px 18px; margin-bottom: 16px; flex-wrap: wrap; }
+.risk-summary { display: flex; align-items: center; gap: 12px; min-width: 260px; }
+.risk-icon { color: #ffb454; background: #ff9f431d; padding: 9px; border-radius: 9px; display: flex; }
+.risk-summary h3 { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.risk-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+button.danger { background: #3a1620; border: 1px solid #b5485f; color: #ff8898; border-radius: 8px; padding: 9px 13px; font-weight: 700; display: inline-flex; align-items: center; gap: 7px; }
+button.danger:hover { background: #571d2c; color: #ffb3bd; }
+.limit-row { display: flex; align-items: center; gap: 8px; }
+.limit-row input { width: 130px; border: 1px solid var(--border); border-radius: 8px; background: #0b0d13; color: var(--text); padding: 8px 10px; }
+.limit-row span { white-space: nowrap; }
 @media (max-width: 900px) { .shell { grid-template-columns: 1fr; } aside { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 16px; } .brand { padding-bottom: 14px; } nav { flex-direction: row; overflow-x: auto; padding-bottom: 2px; } nav button { white-space: nowrap; } .security { display: none; } .content { padding: 24px; } .metrics, .main-grid, .lower { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 700px) { .risk-card { flex-direction: column; align-items: stretch; } .risk-actions { justify-content: flex-start; } }
+
 @media (max-width: 600px) { .metrics, .main-grid, .lower { grid-template-columns: 1fr; } header, .view-banner { gap: 16px; flex-direction: column; align-items: stretch; } .content { padding: 18px; } }
 
 /* Bots console */

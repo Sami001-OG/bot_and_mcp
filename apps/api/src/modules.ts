@@ -2,6 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Mo
 import { ApiHeader, ApiTags } from '@nestjs/swagger';
 import { WebSocketGateway, WebSocketServer, SubscribeMessage, MessageBody } from '@nestjs/websockets';
 import { Server } from 'socket.io';
+import { randomBytes } from 'node:crypto';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import { TradingViewSignalSchema, type ExchangeId, type TradingViewSignal } from '@platform/contracts';
@@ -10,7 +11,7 @@ import { ExchangeError, type MarketInfo } from '@platform/exchange-core';
 import { TradingViewWebhookVerifier } from '@platform/webhook';
 import { encryption, prisma, Prisma, type ExchangeAccount, type OrderIntent } from '@platform/database';
 import { hashToken } from '@platform/security';
-import { CommandError, OrdersQueue, cancelOrderCommand, closeAllCommand, createBot, createWebhookEndpoint, decryptCredentials, getBot, listBots, listExchangeMarkets, listLedgerPositions, listWebhookEndpoints, listWorkspaceOrders, parseOrderBody, placeOrder, portfolioPositions, portfolioSummary, realizedPnlInWindow, setBotStatus, updateBotConfig } from '@platform/commands';
+import { checkCircuitBreaker, CommandError, OrdersQueue, cancelOrderCommand, closeAllCommand, createBot, createWebhookEndpoint, dailyRealizedPnl, decryptCredentials, getBot, listBots, listExchangeMarkets, listLedgerPositions, listWebhookEndpoints, listWorkspaceOrders, parseOrderBody, placeOrder, portfolioPositions, portfolioSummary, realizedPnlInWindow, setBotStatus, updateBotConfig } from '@platform/commands';
 import { AuthController } from './auth.controller.js';
 import { AuthGuard, WorkspaceGuard, type AuthedRequest } from './guards.js';
 
@@ -443,11 +444,98 @@ class NotificationsController {
   }
 }
 
+const MCP_TOOLS = ['getPortfolio', 'getBalance', 'getPositions', 'getOrders', 'getMarketData', 'getMarkets', 'getOHLCV', 'getFundingRate', 'getOpenInterest', 'getRiskMetrics', 'getPerformance', 'getTradeHistory', 'placeOrder', 'cancelOrder', 'closePosition', 'closeAll', 'changeLeverage', 'createBot', 'resumeBot', 'pauseBot', 'deleteBot'] as const;
+
+@ApiTags('mcp-clients')
+@Controller('mcp-clients')
+@UseGuards(AuthGuard, WorkspaceGuard)
+class McpClientsController {
+  @Get()
+  async list(@Req() request: AuthedRequest) {
+    const clients = await prisma.mcpClient.findMany({ where: { workspaceId: request.user.workspaceId }, orderBy: [{ createdAt: 'desc' }] });
+    return clients.map((client) => ({ id: client.id, name: client.name, allowedTools: client.allowedTools, allowedExchangeAccountIds: client.allowedExchangeAccountIds, allowedSymbols: client.allowedSymbols, maxLeverage: client.maxLeverage, maxNotional: client.maxNotional.toString(), expiresAt: client.expiresAt.toISOString(), revokedAt: client.revokedAt?.toISOString() ?? null, createdAt: client.createdAt.toISOString() }));
+  }
+
+  @Post()
+  async create(@Req() request: AuthedRequest, @Body() body: { name?: string; allowedTools?: string[]; allowedExchangeAccountIds?: string[]; allowedSymbols?: string[]; maxLeverage?: number; maxNotional?: string; expiresInDays?: number }) {
+    const name = (body.name ?? '').trim();
+    if (!name) throw new HttpException('Name is required', HttpStatus.BAD_REQUEST);
+    if (name.length > 120) throw new HttpException('Name is too long', HttpStatus.BAD_REQUEST);
+    const workspaceId = request.user.workspaceId;
+    const allowedTools = body.allowedTools ?? [];
+    for (const tool of allowedTools) {
+      if (tool !== '*' && !(MCP_TOOLS as readonly string[]).includes(tool)) throw new HttpException(`Unknown tool "${tool}". Available: ${MCP_TOOLS.join(', ')}`, HttpStatus.BAD_REQUEST);
+    }
+    let allowedAccountIds = body.allowedExchangeAccountIds ?? [];
+    if (allowedAccountIds.includes('*')) allowedAccountIds = [];
+    if (allowedAccountIds.length > 0) {
+      const count = await prisma.exchangeAccount.count({ where: { id: { in: allowedAccountIds }, workspaceId } });
+      if (count !== allowedAccountIds.length) throw new HttpException('One or more exchangeAccountIds do not belong to this workspace', HttpStatus.BAD_REQUEST);
+    }
+    const allowedSymbols = (body.allowedSymbols ?? []).map((symbol) => symbol.toUpperCase());
+    const maxLeverage = body.maxLeverage ?? 20;
+    if (!Number.isInteger(maxLeverage) || maxLeverage < 1 || maxLeverage > 200) throw new HttpException('maxLeverage must be an integer between 1 and 200', HttpStatus.BAD_REQUEST);
+    const maxNotional = body.maxNotional ?? '10000';
+    if (!/^\d+(\.\d+)?$/.test(maxNotional) || Number(maxNotional) <= 0) throw new HttpException('maxNotional must be a positive number', HttpStatus.BAD_REQUEST);
+    const expiresInDays = body.expiresInDays ?? 30;
+    if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 365) throw new HttpException('expiresInDays must be an integer between 1 and 365', HttpStatus.BAD_REQUEST);
+    const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
+    const token = randomBytes(32).toString('base64url');
+    const client = await prisma.mcpClient.create({
+      data: { workspaceId, name, tokenHash: hashToken(token), allowedTools, allowedExchangeAccountIds: allowedAccountIds, allowedSymbols, maxLeverage, maxNotional: new Prisma.Decimal(maxNotional), expiresAt }
+    });
+    return { id: client.id, name: client.name, token, expiresAt: expiresAt.toISOString(), allowedTools, allowedExchangeAccountIds: allowedAccountIds, allowedSymbols, maxLeverage, maxNotional, note: 'Store this token now; only its hash is persisted and it is never returned again.' };
+  }
+
+  @Post(':id/revoke')
+  async revoke(@Req() request: AuthedRequest, @Param('id') id: string) {
+    const client = await prisma.mcpClient.findFirst({ where: { id, workspaceId: request.user.workspaceId } });
+    if (!client) throw new HttpException('MCP client not found', HttpStatus.NOT_FOUND);
+    const revokedAt = new Date();
+    await prisma.mcpClient.update({ where: { id }, data: { revokedAt } });
+    return { id: client.id, revokedAt: revokedAt.toISOString() };
+  }
+}
+
 @WebSocketGateway({ namespace: '/realtime', cors: { origin: true, credentials: true } })
 class RealtimeGateway {
   @WebSocketServer() server!: Server;
   @SubscribeMessage('subscribe') subscribe(@MessageBody() body: { topics: string[] }) { return { event: 'subscribed', data: { topics: body.topics, sequence: '0' } }; }
 }
 
-@Module({ controllers: [HealthController, AuthController, ExchangeAccountsController, OrdersController, PortfolioController, WebhooksController, WebhookIngressController, BotsController, NotificationsController], providers: [RealtimeGateway] })
+@ApiTags('workspaces')
+@Controller('workspaces')
+@UseGuards(AuthGuard, WorkspaceGuard)
+class WorkspacesController {
+  @Get('me')
+  async me(@Req() request: AuthedRequest) {
+    const workspaceId = request.user.workspaceId;
+    const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { liveTradingEnabled: true, liveTradingAcknowledgedAt: true, dailyLossLimit: true } });
+    if (!workspace) throw new HttpException('Workspace not found', HttpStatus.NOT_FOUND);
+    return {
+      liveTradingEnabled: workspace.liveTradingEnabled,
+      liveTradingAcknowledgedAt: workspace.liveTradingAcknowledgedAt?.toISOString() ?? null,
+      dailyLossLimit: workspace.dailyLossLimit?.toString() ?? null,
+      dailyRealizedPnl: await dailyRealizedPnl(workspaceId),
+      circuitBreaker: (await checkCircuitBreaker(workspaceId)).ok
+    };
+  }
+
+  @Patch('me')
+  async patch(@Req() request: AuthedRequest, @Body() body: { enabled?: boolean; dailyLossLimit?: number | null }) {
+    const workspaceId = request.user.workspaceId;
+    const data: { liveTradingEnabled?: boolean; dailyLossLimit?: Prisma.Decimal | null } = {};
+    if (body.enabled !== undefined) data.liveTradingEnabled = body.enabled;
+    if (body.dailyLossLimit !== undefined) {
+      if (body.dailyLossLimit === null) data.dailyLossLimit = null;
+      else if (Number.isFinite(body.dailyLossLimit) && body.dailyLossLimit > 0) data.dailyLossLimit = new Prisma.Decimal(body.dailyLossLimit);
+      else throw new HttpException('dailyLossLimit must be a positive number or null', HttpStatus.BAD_REQUEST);
+    }
+    if (Object.keys(data).length === 0) throw new HttpException('Nothing to update', HttpStatus.BAD_REQUEST);
+    const updated = await prisma.workspace.update({ where: { id: workspaceId }, data });
+    return { liveTradingEnabled: updated.liveTradingEnabled, dailyLossLimit: updated.dailyLossLimit?.toString() ?? null };
+  }
+}
+
+@Module({ controllers: [HealthController, AuthController, ExchangeAccountsController, OrdersController, PortfolioController, WebhooksController, WebhookIngressController, BotsController, NotificationsController, McpClientsController, WorkspacesController], providers: [RealtimeGateway] })
 export class AppModule {}

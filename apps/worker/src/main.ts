@@ -1,14 +1,15 @@
 import './env.js';
 import { Worker, Queue, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
+import nodemailer from 'nodemailer';
 import { Prisma, encryption, prisma, type ExchangeAccount, type ExchangeCredential, type OrderIntent } from '@platform/database';
 import { createExchangeAdapter } from '@platform/exchange-adapters';
 import { ExchangeError, type ExchangeAdapter, type ExchangeOrder } from '@platform/exchange-core';
 import { evaluateOrder, type RiskPolicy } from '@platform/risk-engine';
 import { OrderRequestSchema, TradingViewSignalSchema, WebhookBotConfigSchema, type Allocation, type ExchangeId, type PositionSide, type ResolvedOrderRequest, type TradingViewSignal, type WebhookBotConfig } from '@platform/contracts';
-import { sizeOrder, applyFill, type PositionSnapshot } from '@platform/trading-core';
+import { sizeOrder, applyFill, alignAmount, alignPrice, type PositionSnapshot } from '@platform/trading-core';
 import { buildWebhookOrders } from '@platform/bot-engine';
-import { syncPositionsFromExchange } from '@platform/commands';
+import { checkCircuitBreaker, marketPrecisionOf, syncPositionsFromExchange } from '@platform/commands';
 
 const connection = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', { maxRetriesPerRequest: null });
 const ordersQueue = new Queue('orders', { connection });
@@ -178,13 +179,15 @@ async function executeOrder(job: Job<{ action: 'execute'; orderId: string }>): P
     }
     submitted = true;
     let quantity = order.quantity.toString();
+    const precision = await marketPrecisionOf(adapter, order.symbol).catch(() => null);
     if (order.allocation) {
       const price = order.price?.toString() ?? await adapter.getPrice(order.symbol);
       const balances = await adapter.getBalance();
-      const quote = order.symbol.split('/')[1] ?? 'USDT';
-      const equity = balances.find((balance) => balance.asset === quote)?.free ?? '0';
+      const quote = (order.symbol.split('/')[1] ?? 'USDT').split(':')[0];
+      const balance = balances.find((balance) => balance.asset === quote);
+      const equity = balance ? balance.total : '0';
       const maxEquity = account.peakEquity?.toString() ?? equity;
-      const sized = sizeOrder({ allocation: order.allocation as unknown as Allocation, marketType: account.marketType, price, equity, maxEquity, ...(order.leverage == null ? {} : { leverage: order.leverage }), ...(order.stopPrice ? { stopPrice: order.stopPrice.toString() } : {}) });
+      const sized = sizeOrder({ allocation: order.allocation as unknown as Allocation, marketType: account.marketType, price, equity, maxEquity, ...(order.leverage == null ? {} : { leverage: order.leverage }), ...(order.stopPrice ? { stopPrice: order.stopPrice.toString() } : {}), ...(precision ? { precision } : {}), ...(order.reduceOnly ? { skipMinimum: true } : {}) });
       if (!sized.ok || sized.quantity === undefined) {
         await setState(order.id, 'REJECTED', `SIZING:${sized.reasons.join(';')}`);
         return { orderId: order.id, status: 'REJECTED', reasons: sized.reasons };
@@ -194,13 +197,24 @@ async function executeOrder(job: Job<{ action: 'execute'; orderId: string }>): P
         await prisma.orderIntent.update({ where: { id: order.id }, data: { quantity: new Prisma.Decimal(quantity), ...(order.leverage === null || order.leverage !== sized.leverage ? { leverage: sized.leverage } : {}) } });
       }
     }
+    if (!order.reduceOnly && precision?.amountMin !== undefined && Number.isFinite(precision.amountMin) && precision.amountMin > 0 && new Prisma.Decimal(quantity).lessThan(new Prisma.Decimal(precision.amountMin))) {
+      await setState(order.id, 'REJECTED', `PRECISION:quantity ${quantity} below exchange minimum ${precision.amountMin}`);
+      return { orderId: order.id, status: 'REJECTED', reasons: [`Quantity ${quantity} is below the exchange minimum of ${precision.amountMin}`] };
+    }
+    const alignedQuantity = alignAmount(quantity, precision ?? undefined);
+    if (alignedQuantity !== quantity) {
+      quantity = alignedQuantity;
+      await prisma.orderIntent.update({ where: { id: order.id }, data: { quantity: new Prisma.Decimal(quantity) } });
+    }
+    const snappedPrice = precision && order.price !== null ? alignPrice(order.price.toString(), precision) : order.price?.toString();
+    const snappedStop = precision && order.stopPrice !== null ? alignPrice(order.stopPrice.toString(), precision) : order.stopPrice?.toString();
     if (account.marketType !== 'SPOT') {
       await adapter.setMarginMode(order.symbol, order.marginMode ?? 'ISOLATED').catch(() => undefined);
     }
     if (account.marketType !== 'SPOT' && order.leverage) {
       await adapter.setLeverage(order.symbol, order.leverage).catch(() => undefined);
     }
-    const request = OrderRequestSchema.parse({ exchangeAccountId: account.id, exchange: account.exchange.toLowerCase() as ExchangeId, marketType: account.marketType, symbol: order.symbol, side: order.side, positionSide: order.positionSide, type: order.orderType, quantity, price: order.price?.toString(), stopPrice: order.stopPrice?.toString(), reduceOnly: order.reduceOnly, postOnly: order.postOnly, clientOrderId: order.clientOrderId, idempotencyKey: order.idempotencyKey }) as ResolvedOrderRequest;
+    const request = OrderRequestSchema.parse({ exchangeAccountId: account.id, exchange: account.exchange.toLowerCase() as ExchangeId, marketType: account.marketType, symbol: order.symbol, side: order.side, positionSide: order.positionSide, type: order.orderType, quantity, price: snappedPrice, stopPrice: snappedStop, reduceOnly: order.reduceOnly, postOnly: order.postOnly, clientOrderId: order.clientOrderId, idempotencyKey: order.idempotencyKey }) as ResolvedOrderRequest;
     const exchangeOrder = await adapter.placeOrder(request);
     try {
       await prisma.orderIntent.update({ where: { id: order.id }, data: { exchangeOrderId: exchangeOrder.id } });
@@ -328,20 +342,30 @@ async function runBotEvaluation(bot: BotWithAccount, config: WebhookBotConfig, s
   const runMetrics: Record<string, unknown> = { ...(context.deliveryId ? { deliveryId: context.deliveryId } : {}), nonce: signal.nonce, action: signal.action, symbol: signal.symbol };
   const run = await prisma.botRun.create({ data: { botId: bot.id, status: 'ACTIVE', metrics: runMetrics as unknown as Prisma.InputJsonValue } });
   try {
+    const breaker = await checkCircuitBreaker(bot.workspaceId);
+    if (!breaker.ok) {
+      await queueNotification(bot.workspaceId, { channel: 'breaker', severity: 'CRITICAL', title: 'Circuit breaker blocked bot run', message: breaker.reason, payload: { botId: bot.id, signal: signal.nonce, ...breaker }, jobId: `breaker-${bot.workspaceId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}` });
+      runMetrics.notes = [`Circuit breaker: ${breaker.reason}`];
+      await prisma.botRun.update({ where: { id: run.id }, data: { status: 'STOPPED', stoppedAt: new Date(), metrics: runMetrics as unknown as Prisma.InputJsonValue } });
+      return { runId: run.id, accountId: account.id, status: 'STOPPED', orders: [], skipped: [], notes: [breaker.reason], price: null, positionSide: null };
+    }
     let price: string | undefined;
     let equity = (account.equity ?? new Prisma.Decimal(0)).toString();
     let maxEquity = (account.peakEquity ?? new Prisma.Decimal(0)).toString();
     let currentPositionSide: PositionSide | undefined;
+    let positionQuantity: number | undefined;
+    let precision: ReturnType<typeof marketPrecisionOf> extends Promise<infer T> ? T : null = null;
     const session = await connectToAccount(account);
     try {
       price = await session.adapter.getPrice(signal.symbol).catch(() => undefined);
-      const quote = signal.symbol.split('/')[1] ?? 'USDT';
+      const quote = (signal.symbol.split('/')[1] ?? 'USDT').split(':')[0] ?? 'USDT';
       const balance = (await session.adapter.getBalance().catch(() => [])).find((entry) => entry.asset.toUpperCase() === quote.toUpperCase());
-      if (balance && Number(balance.free) > 0) equity = balance.free;
+      if (balance && Number(balance.total) > 0) equity = balance.total;
       const position = (await session.adapter.getPositions().catch(() => [])).find((entry) => entry.symbol.toUpperCase() === signal.symbol.toUpperCase());
-      if (position && position.side !== 'BOTH') currentPositionSide = position.side;
+      if (position && position.side !== 'BOTH') { currentPositionSide = position.side; positionQuantity = Number(position.quantity); }
+      precision = await marketPrecisionOf(session.adapter, signal.symbol).catch(() => null);
     } finally { await session.adapter.disconnect().catch(() => undefined); }
-    const result = buildWebhookOrders({ signal, config, account: { id: account.id, exchange: account.exchange.toLowerCase(), marketType: account.marketType }, ...(price === undefined ? {} : { price }), equity, maxEquity, ...(currentPositionSide === undefined ? {} : { currentPositionSide }) });
+    const result = buildWebhookOrders({ signal, config, account: { id: account.id, exchange: account.exchange.toLowerCase(), marketType: account.marketType }, botId: bot.id, ...(price === undefined ? {} : { price }), ...(positionQuantity === undefined ? {} : { positionQuantity }), equity, maxEquity, ...(currentPositionSide === undefined ? {} : { currentPositionSide }), ...(precision ? { precision } : {}) });
     const created: string[] = [];
     for (const order of result.orders) {
       if (!order.reduceOnly) {
@@ -374,12 +398,42 @@ async function createNotification(job: Job<{ workspaceId: string; channel: strin
   const duplicate = await prisma.notification.findFirst({ where: { workspaceId, channel, title, createdAt: { gte: new Date(Date.now() - 30_000) } }, orderBy: { createdAt: 'desc' } });
   if (duplicate) return { notificationId: duplicate.id, deduped: true };
   const created = await prisma.notification.create({ data: { workspaceId, channel, severity, title, ...(message ? { message } : {}), ...(payload ? { payload: payload as Prisma.InputJsonValue } : {}) } });
-  return { notificationId: created.id, deduped: false };
+  const emailSent = await sendEmailAlert({ severity, title, ...(message ? { message } : {}), channel }).catch(() => false);
+  return { notificationId: created.id, deduped: false, emailSent };
 }
 
 function queueNotification(workspaceId: string, data: { channel: string; severity: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL'; title: string; message?: string; payload?: unknown; jobId: string }): Promise<void> {
   const { jobId, ...rest } = data;
   return notificationsQueue.add('notify', { workspaceId, ...rest }, { jobId, attempts: 3, backoff: { type: 'exponential', delay: 1000 }, removeOnComplete: true, removeOnFail: false }).then(() => undefined).catch(() => undefined);
+}
+
+const EMAIL_SEVERITY_ORDER: Array<'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL'> = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'CRITICAL'];
+
+function createAlertMailer(): nodemailer.Transporter | null {
+  const url = process.env.SMTP_URL;
+  if (!url) return null;
+  try { return nodemailer.createTransport(url); } catch { return null; }
+}
+
+const alertMailer = createAlertMailer();
+const alertTo = process.env.ALERT_EMAIL_TO;
+const alertFrom = process.env.ALERT_EMAIL_FROM ?? 'NexusTrade Alerts <no-reply@nexustrade.local>';
+const alertMinSeverity = (process.env.ALERT_EMAIL_SEVERITY ?? 'WARN').toUpperCase() as 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL';
+
+async function sendEmailAlert(input: { severity: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL'; title: string; message?: string; channel: string }): Promise<boolean> {
+  if (!alertMailer || !alertTo) return false;
+  if (EMAIL_SEVERITY_ORDER.indexOf(input.severity) < EMAIL_SEVERITY_ORDER.indexOf(alertMinSeverity)) return false;
+  try {
+    await alertMailer.sendMail({
+      from: alertFrom,
+      to: alertTo,
+      subject: `[${input.severity}] ${input.title}`,
+      text: `${input.title}\n\n${input.message ?? ''}\n\nChannel: ${input.channel}\nTime: ${new Date().toISOString()}`
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function processWebhook(job: Job<{ deliveryId: string; endpointId: string; signal: TradingViewSignal }>): Promise<Record<string, unknown>> {

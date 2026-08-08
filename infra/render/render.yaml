@@ -10,17 +10,53 @@ services:
         fromDatabase: { name: trading-postgres-staging, property: connectionString }
       - key: REDIS_URL
         fromService: { type: redis, name: trading-redis-staging, property: connectionString }
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: WEBHOOK_SIGNING_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: SMTP_URL
+        sync: false
+      - key: ALERT_EMAIL_TO
+        sync: false
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_SECRET_KEY
+        sync: false
   - type: worker
     name: trading-worker-staging
     runtime: docker
-    dockerfilePath: ./infra/docker/Dockerfile
+    dockerfile: ./infra/docker/Dockerfile
     dockerCommand: node apps/worker/dist/main.js
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: { provider: postgres, name: trading-postgres-staging, property: connectionString }
+      - key: REDIS_URL
+        fromService: { type: redis, name: trading-redis-staging, property: connectionString }
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: SMTP_URL
+        sync: false
+      - key: ALERT_EMAIL_TO
+        sync: false
   - type: web
     name: trading-mcp-staging
     runtime: docker
-    dockerfilePath: ./infra/docker/Dockerfile
+    dockerfile: ./infra/docker/Dockerfile
     dockerCommand: node apps/mcp-server/dist/main.js
     healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: { provider: postgres, name: trading-postgres-staging, property: connectionString }
+      - key: REDIS_URL
+        fromService: { type: redis, name: trading-redis-staging, property: connectionString }
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
   - type: redis
     name: trading-redis-staging
     plan: standard
@@ -28,3 +64,5 @@ services:
 databases:
   - name: trading-postgres-staging
     plan: standard
+    databaseName: trading
+    user: trading

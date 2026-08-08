@@ -21,8 +21,8 @@ describe('buildWebhookOrders', () => {
     if (!entry || !sl || !tp1 || !tp2) throw new Error('expected 4 orders');
     expect(entry).toMatchObject({ side: 'BUY', positionSide: 'LONG', type: 'MARKET', quantity: '0.01', reduceOnly: false, idempotencyKey: 'n-123456789012:entry' });
     expect(sl).toMatchObject({ side: 'SELL', type: 'STOP_MARKET', stopPrice: '90000', reduceOnly: true, idempotencyKey: 'n-123456789012:sl' });
-    expect(tp1).toMatchObject({ side: 'SELL', type: 'TAKE_PROFIT_MARKET', stopPrice: '100000', reduceOnly: true, idempotencyKey: 'n-123456789012:tp:0' });
-    expect(tp2).toMatchObject({ side: 'SELL', type: 'TAKE_PROFIT_MARKET', stopPrice: '110000', reduceOnly: true, idempotencyKey: 'n-123456789012:tp:1' });
+    expect(tp1).toMatchObject({ side: 'SELL', type: 'TAKE_PROFIT_MARKET', stopPrice: '100000', reduceOnly: true, quantity: '0.00500000', idempotencyKey: 'n-123456789012:tp:0' });
+    expect(tp2).toMatchObject({ side: 'SELL', type: 'TAKE_PROFIT_MARKET', stopPrice: '110000', reduceOnly: true, quantity: '0.00500000', idempotencyKey: 'n-123456789012:tp:1' });
   });
 
   it('config stopLoss and takeProfits override signal values', () => {
@@ -79,12 +79,30 @@ describe('buildWebhookOrders', () => {
   });
 
   it('partial exit closes a percentage of the position', () => {
-    const result = buildWebhookOrders({ signal: signal({ action: 'PARTIAL_EXIT', close_percentage: 25 }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000', currentPositionSide: 'LONG' });
+    const result = buildWebhookOrders({ signal: signal({ action: 'PARTIAL_EXIT', close_percentage: 25 }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000', currentPositionSide: 'LONG', positionQuantity: 0.01 });
     expect(result.orders).toHaveLength(1);
     const close = result.orders[0];
     if (!close) throw new Error('expected partial exit order');
     expect(close).toMatchObject({ side: 'SELL', positionSide: 'LONG', reduceOnly: true });
     expect(Number(close.quantity)).toBeCloseTo(0.0025);
+  });
+
+  it('close orders size from the real position quantity when available', () => {
+    const result = buildWebhookOrders({ signal: signal({ action: 'CLOSE_LONG', size: '0.5' }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000', positionQuantity: 0.125 });
+    expect(result.orders).toHaveLength(1);
+    expect(result.orders[0]).toMatchObject({ quantity: '0.125', idempotencyKey: 'n-123456789012:close' });
+  });
+
+  it('skips close when quantity is zero or empty', () => {
+    const result = buildWebhookOrders({ signal: signal({ action: 'CLOSE_LONG', size: '0' }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    expect(result.orders).toHaveLength(0);
+    expect(result.skipped[0]).toContain('positive position quantity');
+  });
+
+  it('reverse on a flat position is skipped', () => {
+    const result = buildWebhookOrders({ signal: signal({ action: 'REVERSE', size: '0.005' }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000', currentPositionSide: 'LONG', positionQuantity: 0 });
+    expect(result.orders).toHaveLength(0);
+    expect(result.skipped[0]).toContain('non-zero position');
   });
 
   it('partial exit requires position state', () => {
@@ -94,7 +112,7 @@ describe('buildWebhookOrders', () => {
   });
 
   it('reverse closes the existing side and opens the opposite', () => {
-    const result = buildWebhookOrders({ signal: signal({ action: 'REVERSE', size: '0.005' }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000', currentPositionSide: 'LONG' });
+    const result = buildWebhookOrders({ signal: signal({ action: 'REVERSE', size: '0.005' }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000', currentPositionSide: 'LONG', positionQuantity: 0.005 });
     expect(result.orders).toHaveLength(2);
     const close = result.orders[0];
     const entry = result.orders[1];
