@@ -1,3 +1,4 @@
+import './env.js';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
