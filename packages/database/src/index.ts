@@ -7,8 +7,11 @@ export * from '../generated/client/index.js';
 export const prisma = new PrismaClient();
 
 export function loadEncryption(): EnvelopeEncryption {
-  const keyHex = process.env.ENCRYPTION_KEY;
-  if (!keyHex || !/^[0-9a-f]{64}$/i.test(keyHex)) throw new Error('ENCRYPTION_KEY must be a 64-char hex string (32 bytes)');
-  return new EnvelopeEncryption(Buffer.from(keyHex, 'hex'));
+  const raw = process.env.ENCRYPTION_KEY;
+  if (!raw) throw new Error('ENCRYPTION_KEY is required');
+  const keyBytes = /^[0-9a-f]{64}$/i.test(raw)
+    ? Buffer.from(raw, 'hex')
+    : Buffer.from(raw, 'base64');
+  return new EnvelopeEncryption(keyBytes);
 }
 export const encryption = loadEncryption();
