@@ -11,6 +11,7 @@ export function getApiBaseUrl(): string {
         return `https://trading-api-${label.slice('trading-web-'.length)}.onrender.com/api/v1`;
       }
     }
+    if (host !== 'localhost' && host !== '127.0.0.1') return '/api/v1';
   }
   return 'http://localhost:4000/api/v1';
 }
