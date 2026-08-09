@@ -59,6 +59,9 @@
 
 ### Active
 - Sprint complete — dashboard, notifications UI, order/execution history all live and verified. Next: market-precision/algo scheduling are optional leftovers.
+- **Hosting decision (this session):** local-only on this machine. Render attempt cancelled — account has no payment method (`need_payment_info`), free tier can't run the worker (background workers not available on free), and the user wants full local hosting. Render `Helio` service + free-tier Postgres/Redis were created and then **deleted**; root `Dockerfile` (Render-CLI leftover) removed. Render CLI v2.22.0 remains installed at `C:\Users\saifs\bin\render.exe` (logged in, workspace `tea-d8mgqm3bc2fs73dvcveg`). `infra/render/render.yaml` + CI image job + `infra/docker/Dockerfile` stay as deployment artifacts (CI builds GHCR image on main). Local stack verified healthy: API :4000 `/api/v1/health` 200, web :3000 `/bots` 200, worker reconciliation + `sync-positions` ticking, Postgres :5432, Redis :6380.
+- **ENCRYPTION_KEY loader relaxed** (`packages/database/src/index.ts`): accepts 64-char hex **or** base64 (32 bytes) — Render `generateValue` outputs base64; `EnvelopeEncryption` still enforces exactly 32 bytes. Verified round-trip for both formats.
+- **CI docker image build fixed**: `packages/database` `build` script now runs `prisma generate` **before** `tsc` (fresh Docker builds had no `generated/` → TS2307); Dockerfile build stage sets a dummy `DATABASE_URL` for generate (runtime stage gets real one from Render env). EPERM on Windows (`query_engine-windows.dll` locked by running processes) is a local-only artifact — CI/Linux unaffected.
 
 ### Blocked
 - None — Binance removal done; Hyperliquid explicitly declined for now (adapter capability stays, just not gated on).
