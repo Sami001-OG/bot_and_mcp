@@ -5,7 +5,7 @@ import { Server } from 'socket.io';
 import { randomBytes } from 'node:crypto';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
-import { TradingViewSignalSchema, type ExchangeId, type TradingViewSignal } from '@platform/contracts';
+import { TradingViewSignalSchema, WorkspaceHandleSchema, type ExchangeId, type TradingViewSignal } from '@platform/contracts';
 import { createExchangeAdapter, runReadOnlyCertification } from '@platform/exchange-adapters';
 import { ExchangeError, type MarketInfo } from '@platform/exchange-core';
 import { TradingViewWebhookVerifier } from '@platform/webhook';
@@ -480,11 +480,12 @@ class McpClientsController {
     const expiresInDays = body.expiresInDays ?? 30;
     if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 365) throw new HttpException('expiresInDays must be an integer between 1 and 365', HttpStatus.BAD_REQUEST);
     const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
+    const workspace = await prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { handle: true } });
     const token = randomBytes(32).toString('base64url');
     const client = await prisma.mcpClient.create({
       data: { workspaceId, name, tokenHash: hashToken(token), allowedTools, allowedExchangeAccountIds: allowedAccountIds, allowedSymbols, maxLeverage, maxNotional: new Prisma.Decimal(maxNotional), expiresAt }
     });
-    return { id: client.id, name: client.name, token, expiresAt: expiresAt.toISOString(), allowedTools, allowedExchangeAccountIds: allowedAccountIds, allowedSymbols, maxLeverage, maxNotional, note: 'Store this token now; only its hash is persisted and it is never returned again.' };
+    return { id: client.id, name: client.name, token, mcpEndpoint: `/mcp/${workspace.handle}`, expiresAt: expiresAt.toISOString(), allowedTools, allowedExchangeAccountIds: allowedAccountIds, allowedSymbols, maxLeverage, maxNotional, note: 'Store this token now; only its hash is persisted and it is never returned again.' };
   }
 
   @Post(':id/revoke')
@@ -510,9 +511,11 @@ class WorkspacesController {
   @Get('me')
   async me(@Req() request: AuthedRequest) {
     const workspaceId = request.user.workspaceId;
-    const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { liveTradingEnabled: true, liveTradingAcknowledgedAt: true, dailyLossLimit: true } });
+    const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { handle: true, liveTradingEnabled: true, liveTradingAcknowledgedAt: true, dailyLossLimit: true } });
     if (!workspace) throw new HttpException('Workspace not found', HttpStatus.NOT_FOUND);
     return {
+      handle: workspace.handle,
+      mcpEndpoint: `/mcp/${workspace.handle}`,
       liveTradingEnabled: workspace.liveTradingEnabled,
       liveTradingAcknowledgedAt: workspace.liveTradingAcknowledgedAt?.toISOString() ?? null,
       dailyLossLimit: workspace.dailyLossLimit?.toString() ?? null,
@@ -522,18 +525,25 @@ class WorkspacesController {
   }
 
   @Patch('me')
-  async patch(@Req() request: AuthedRequest, @Body() body: { enabled?: boolean; dailyLossLimit?: number | null }) {
+  async patch(@Req() request: AuthedRequest, @Body() body: { enabled?: boolean; dailyLossLimit?: number | null; handle?: string }) {
     const workspaceId = request.user.workspaceId;
-    const data: { liveTradingEnabled?: boolean; dailyLossLimit?: Prisma.Decimal | null } = {};
+    const data: { liveTradingEnabled?: boolean; dailyLossLimit?: Prisma.Decimal | null; handle?: string } = {};
     if (body.enabled !== undefined) data.liveTradingEnabled = body.enabled;
     if (body.dailyLossLimit !== undefined) {
       if (body.dailyLossLimit === null) data.dailyLossLimit = null;
       else if (Number.isFinite(body.dailyLossLimit) && body.dailyLossLimit > 0) data.dailyLossLimit = new Prisma.Decimal(body.dailyLossLimit);
       else throw new HttpException('dailyLossLimit must be a positive number or null', HttpStatus.BAD_REQUEST);
     }
+    if (body.handle !== undefined) {
+      const handle = WorkspaceHandleSchema.safeParse(body.handle);
+      if (!handle.success) throw new HttpException('Invalid workspace handle: lowercase letters, digits and single hyphens, 3-32 characters', HttpStatus.BAD_REQUEST);
+      const clash = await prisma.workspace.findUnique({ where: { handle: handle.data }, select: { id: true } });
+      if (clash && clash.id !== workspaceId) throw new HttpException('Workspace handle is already taken', HttpStatus.CONFLICT);
+      data.handle = handle.data;
+    }
     if (Object.keys(data).length === 0) throw new HttpException('Nothing to update', HttpStatus.BAD_REQUEST);
     const updated = await prisma.workspace.update({ where: { id: workspaceId }, data });
-    return { liveTradingEnabled: updated.liveTradingEnabled, dailyLossLimit: updated.dailyLossLimit?.toString() ?? null };
+    return { handle: updated.handle, mcpEndpoint: `/mcp/${updated.handle}`, liveTradingEnabled: updated.liveTradingEnabled, dailyLossLimit: updated.dailyLossLimit?.toString() ?? null };
   }
 }
 

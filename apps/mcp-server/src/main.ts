@@ -92,13 +92,18 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-app.post('/mcp', async (req, res) => {
-  const client = await authorize(String(req.header('authorization') ?? ''));
-  if (!client) return res.status(401).json({ error: 'A valid, active MCP grant bearer token is required' });
+async function handleMcp(client: McpClient, req: express.Request, res: express.Response): Promise<void> {
   const sessionId = req.header('mcp-session-id');
   const existing = sessionId ? sessions.get(sessionId) : undefined;
-  if (sessionId && !existing) return res.status(404).json({ error: 'Session not found or expired' });
+  if (sessionId && !existing) {
+    res.status(404).json({ error: 'Session not found or expired' });
+    return;
+  }
   if (existing) {
+    if (existing.clientId !== client.id) {
+      res.status(403).json({ error: 'Session belongs to a different grant' });
+      return;
+    }
     existing.lastUsed = Date.now();
     await existing.transport.handleRequest(req, res, req.body);
     return;
@@ -109,6 +114,27 @@ app.post('/mcp', async (req, res) => {
   sessions.set(id, { server, transport, clientId: client.id, lastUsed: Date.now() });
   await server.connect(transport as unknown as Parameters<McpServer['connect']>[0]);
   await transport.handleRequest(req, res, req.body);
+}
+
+app.post('/mcp', async (req, res) => {
+  const client = await authorize(String(req.header('authorization') ?? ''));
+  if (!client) return res.status(401).json({ error: 'A valid, active MCP grant bearer token is required' });
+  await handleMcp(client, req, res);
+});
+
+app.post('/mcp/:handle', async (req, res) => {
+  const workspace = await prisma.workspace.findUnique({ where: { handle: req.params.handle.toLowerCase() } });
+  if (!workspace) return res.status(404).json({ error: 'Unknown workspace handle' });
+  const client = await authorize(String(req.header('authorization') ?? ''));
+  if (!client) return res.status(401).json({ error: 'A valid, active MCP grant bearer token is required' });
+  if (client.workspaceId !== workspace.id) return res.status(403).json({ error: 'This grant does not belong to the requested workspace' });
+  await handleMcp(client, req, res);
+});
+
+app.get('/mcp/:handle', async (req, res) => {
+  const workspace = await prisma.workspace.findUnique({ where: { handle: req.params.handle.toLowerCase() } });
+  if (!workspace) return res.status(404).json({ error: 'Unknown workspace handle' });
+  res.json({ endpoint: `/mcp/${workspace.handle}`, handle: workspace.handle, mcp: 'streamable-http', name: 'crypto-trading-platform', version: '1.0.0', authentication: 'Authorization: Bearer <grant-token>' });
 });
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'mcp-server', time: new Date().toISOString() }));

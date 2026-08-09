@@ -62,6 +62,8 @@ type AppNotification = {
 };
 
 type WorkspaceRisk = {
+  handle: string;
+  mcpEndpoint: string;
   liveTradingEnabled: boolean;
   liveTradingAcknowledgedAt: string | null;
   dailyLossLimit: string | null;
@@ -374,6 +376,33 @@ export default function Dashboard() {
             </label>
           </div>
         </div>
+
+        {workspaceRisk?.mcpEndpoint && (
+          <div className="mcp-card">
+            <div className="risk-summary">
+              <div className="risk-icon"><Bot size={18} /></div>
+              <div>
+                <p>AI agent endpoint (MCP)</p>
+                <h3>https://&lt;mcp-host&gt;{workspaceRisk.mcpEndpoint}</h3>
+                <small className="muted">
+                  Connect any AI agent (Claude, Cursor, etc.) with an MCP grant token from <b>POST /api/v1/mcp-clients</b>. Your handle: <b>{workspaceRisk.handle}</b>
+                </small>
+              </div>
+            </div>
+            <div className="risk-actions">
+              <button
+                className="secondary"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(`https://<mcp-host>${workspaceRisk.mcpEndpoint}`).catch(() => undefined);
+                  setNotice({ tone: 'success', message: 'MCP endpoint copied (replace <mcp-host> with your MCP service URL).' });
+                }}
+                type="button"
+              >
+                Copy link
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="window-tabs" role="tablist" aria-label="PnL window">
           {WINDOWS.map((window) => (

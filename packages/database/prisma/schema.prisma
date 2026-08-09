@@ -168,6 +168,7 @@ model Workspace {
   type WorkspaceType
   name String
   slug String @unique
+  handle String @unique
   liveTradingEnabled Boolean @default(false)
   liveTradingAcknowledgedAt DateTime?
   dailyLossLimit Decimal? @db.Decimal(20,8)

@@ -97,6 +97,10 @@ button.danger:hover { background: #571d2c; color: #ffb3bd; }
 .limit-row span { white-space: nowrap; }
 @media (max-width: 900px) { .shell { grid-template-columns: 1fr; } aside { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 16px; } .brand { padding-bottom: 14px; } nav { flex-direction: row; overflow-x: auto; padding-bottom: 2px; } nav button { white-space: nowrap; } .security { display: none; } .content { padding: 24px; } .metrics, .main-grid, .lower { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 700px) { .risk-card { flex-direction: column; align-items: stretch; } .risk-actions { justify-content: flex-start; } }
+.mcp-card { display: flex; justify-content: space-between; align-items: center; gap: 18px; background: #0e1521; border: 1px dashed #2e5f8a; border-radius: 14px; padding: 14px 18px; margin-bottom: 16px; flex-wrap: wrap; }
+.mcp-card .risk-icon { color: #7fd1ff; background: #7fd1ff1d; }
+.mcp-card h3 { font-size: 15px; color: #9fd8ff; word-break: break-all; }
+@media (max-width: 700px) { .mcp-card { flex-direction: column; align-items: stretch; } }
 
 @media (max-width: 600px) { .metrics, .main-grid, .lower { grid-template-columns: 1fr; } header, .view-banner { gap: 16px; flex-direction: column; align-items: stretch; } .content { padding: 18px; } }
 

@@ -100,6 +100,26 @@ export const WebhookBotConfigSchema = z.object({
 export type WebhookBotConfig = z.infer<typeof WebhookBotConfigSchema>;
 export type WebhookBotAction = WebhookBotConfig['actions'] extends Array<infer T> | undefined ? T : never;
 
+export const WorkspaceHandleSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9](?!.*--)[a-z0-9-]{1,30}[a-z0-9]$/, 'Handle must be 3-32 characters: lowercase letters, digits and hyphens (no consecutive, leading or trailing hyphens)');
+export type WorkspaceHandle = z.infer<typeof WorkspaceHandleSchema>;
+
+export function workspaceHandleFromEmail(email: string): string {
+  const local = email.split('@')[0] ?? '';
+  const slug = local
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  if (/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(slug)) return slug;
+  const fallback = slug.replace(/[^a-z0-9]/g, '').slice(0, 12) || 'user';
+  return `${fallback}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export type ApiProblem = {
   type: string;
   title: string;

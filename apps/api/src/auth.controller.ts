@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { Prisma, prisma, type User } from '@platform/database';
+import { workspaceHandleFromEmail } from '@platform/contracts';
 import { createAccessToken, generateRefreshToken, hashPassword, hashRefreshToken, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, verifyPassword } from '@platform/auth';
 import { AuthGuard, type AuthedRequest } from './guards.js';
 
@@ -31,8 +32,20 @@ function publicUser(user: User) {
   return { id: user.id, email: user.email, displayName: user.displayName ?? null, emailVerifiedAt: user.emailVerifiedAt?.toISOString() ?? null };
 }
 
-function publicWorkspace(workspace: { id: string; name: string; slug: string; liveTradingEnabled: boolean; liveTradingAcknowledgedAt: Date | null }) {
-  return { id: workspace.id, name: workspace.name, slug: workspace.slug, liveTradingEnabled: workspace.liveTradingEnabled, liveTradingAcknowledgedAt: workspace.liveTradingAcknowledgedAt?.toISOString() ?? null };
+function publicWorkspace(workspace: { id: string; name: string; slug: string; handle: string; liveTradingEnabled: boolean; liveTradingAcknowledgedAt: Date | null }) {
+  return { id: workspace.id, name: workspace.name, slug: workspace.slug, handle: workspace.handle, liveTradingEnabled: workspace.liveTradingEnabled, liveTradingAcknowledgedAt: workspace.liveTradingAcknowledgedAt?.toISOString() ?? null };
+}
+
+async function uniqueWorkspaceHandle(tx: Prisma.TransactionClient, email: string): Promise<string> {
+  const base = workspaceHandleFromEmail(email);
+  let candidate = base;
+  for (let suffix = 2; suffix < 100; suffix += 1) {
+    const taken = await tx.workspace.findUnique({ where: { handle: candidate }, select: { id: true } });
+    if (!taken) return candidate;
+    const head = base.slice(0, 31 - String(suffix).length);
+    candidate = `${head}-${suffix}`;
+  }
+  throw new HttpException('Could not allocate a unique workspace handle', HttpStatus.CONFLICT);
 }
 
 function clientIp(request: AuthedRequest): string {
@@ -76,6 +89,7 @@ export class AuthController {
           type: 'PERSONAL',
           name: displayName ? `${displayName}'s workspace` : 'My workspace',
           slug: `ws-${randomBytes(8).toString('hex')}`,
+          handle: await uniqueWorkspaceHandle(tx, email),
           liveTradingEnabled: false
         }
       });
