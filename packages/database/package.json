@@ -9,7 +9,7 @@
   "scripts": {
     "generate": "node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js generate --schema prisma/schema.prisma",
     "validate": "node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js validate --schema prisma/schema.prisma",
-    "build": "tsc -p tsconfig.json && node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js generate --schema prisma/schema.prisma",
+    "build": "node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js generate --schema prisma/schema.prisma && tsc -p tsconfig.json",
     "lint": "node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js validate --schema prisma/schema.prisma",
     "typecheck": "node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js validate --schema prisma/schema.prisma",
     "test": "node --env-file-if-exists=../../.env ./node_modules/prisma/build/index.js validate --schema prisma/schema.prisma",

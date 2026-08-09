@@ -3,6 +3,7 @@ RUN corepack enable
 WORKDIR /app
 ARG NEXT_PUBLIC_API_URL=http://localhost:4000/api/v1
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV DATABASE_URL=postgresql://platform:platform@localhost:5432/platform?schema=public
 COPY . .
 RUN pnpm install --frozen-lockfile && pnpm build
 FROM node:22.22.0-alpine AS runtime
