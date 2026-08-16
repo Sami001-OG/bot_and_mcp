@@ -2,7 +2,7 @@ const config = {
   reactStrictMode: true,
   poweredByHeader: false,
   outputFileTracingIncludes: {
-    '/**/*': ['./../packages/database/generated/client/**'],
+    '/**/*': ['./prisma/generated/client/**'],
   },
 };
 
