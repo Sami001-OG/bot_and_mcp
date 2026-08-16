@@ -4,495 +4,172 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mongodb"
   url      = env("DATABASE_URL")
 }
 
-enum WorkspaceType {
-  PERSONAL
-  ORGANIZATION
-}
-
-enum MemberStatus {
-  INVITED
-  ACTIVE
-  SUSPENDED
-}
-
-enum ExchangeName {
-  BINANCE
-  BYBIT
-  OKX
-  KUCOIN
-  KRAKEN
-  COINBASE
-  MEXC
-  HYPERLIQUID
-}
-
-enum MarketType {
-  SPOT
-  MARGIN
-  USDT_FUTURES
-  COIN_FUTURES
-  PERPETUAL
-}
-
-enum CredentialStatus {
-  PENDING
-  VERIFIED
-  ROTATING
-  REVOKED
-  FAILED
-}
-
-enum OrderState {
-  RECEIVED
-  VALIDATED
-  RISK_APPROVED
-  QUEUED
-  SUBMITTING
-  ACKNOWLEDGED
-  PARTIALLY_FILLED
-  FILLED
-  CANCEL_PENDING
-  CANCELED
-  REJECTED
-  RECONCILING
-  FAILED
-}
-
-enum OrderSide {
-  BUY
-  SELL
-}
-
-enum PositionSide {
-  LONG
-  SHORT
-  BOTH
-}
-
-enum MarginMode {
-  CROSS
-  ISOLATED
-}
-
-enum BotType {
-  WEBHOOK
-  INDICATOR
-  DCA
-  GRID
-  SCALPING
-  TREND
-  BREAKOUT
-  MEAN_REVERSION
-  ARBITRAGE
-  CUSTOM
-}
-
-enum BotStatus {
-  DRAFT
-  ACTIVE
-  PAUSED
-  STOPPED
-  ERROR
-}
-
-enum DeliveryStatus {
-  PENDING
-  PROCESSING
-  DELIVERED
-  FAILED
-  DEAD_LETTER
-}
-
-enum Severity {
-  DEBUG
-  INFO
-  WARN
-  ERROR
-  CRITICAL
-}
-
-model User {
-  id String @id @default(uuid()) @db.Uuid
-  email String @unique @db.Citext
-  displayName String?
-  passwordHash String?
-  emailVerifiedAt DateTime?
-  disabledAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  identities IdentityProvider[]
-  sessions Session[]
-  totp TotpCredential?
-  memberships WorkspaceMember[]
-  auditEvents AuditEvent[]
-}
-
-model IdentityProvider {
-  id String @id @default(uuid()) @db.Uuid
-  userId String @db.Uuid
-  provider String
-  providerSubject String
-  createdAt DateTime @default(now())
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  @@unique([provider, providerSubject])
-}
-
-model Session {
-  id String @id @default(uuid()) @db.Uuid
-  userId String @db.Uuid
-  refreshTokenHash String @unique
-  userAgent String?
-  ipAddress String?
-  expiresAt DateTime
-  revokedAt DateTime?
-  createdAt DateTime @default(now())
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  @@index([userId, expiresAt])
-}
-
-model TotpCredential {
-  id String @id @default(uuid()) @db.Uuid
-  userId String @unique @db.Uuid
-  encryptedSecret Json
-  enabledAt DateTime?
-  createdAt DateTime @default(now())
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
-
-model Workspace {
-  id String @id @default(uuid()) @db.Uuid
-  type WorkspaceType
-  name String
-  slug String @unique
-  handle String @unique
-  liveTradingEnabled Boolean @default(false)
+model Settings {
+  id                        String    @id @map("_id") @default(auto()) @db.ObjectId
+  tradingEnabled            Boolean   @default(true)
   liveTradingAcknowledgedAt DateTime?
-  dailyLossLimit Decimal? @db.Decimal(20,8)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  members WorkspaceMember[]
-  exchangeAccounts ExchangeAccount[]
-  riskPolicy RiskPolicy?
-  orders OrderIntent[]
-  positions Position[]
-  bots Bot[]
-  webhookEndpoints WebhookEndpoint[]
-  mcpClients McpClient[]
-  auditEvents AuditEvent[]
-  notifications Notification[]
+  dailyLossLimit            String?
+  equity                    String?
+  peakEquity                String?
+  breakerTripped            Boolean   @default(false)
+  breakerReason             String?
+  breakerDailyPnl           String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 }
 
-model WorkspaceMember {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @db.Uuid
-  userId String @db.Uuid
-  role String
-  status MemberStatus @default(ACTIVE)
-  createdAt DateTime @default(now())
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  @@unique([workspaceId, userId])
-  @@index([userId, status])
+model WebhookEndpoint {
+  id            String   @id @map("_id") @default(auto()) @db.ObjectId
+  name          String
+  signingSecret String
+  active        Boolean  @default(true)
+  lastNonce     String?
+  lastNonceAt   DateTime?
+  createdAt     DateTime @default(now())
+  bot           Bot?
+  deliveries    WebhookDelivery[]
+}
+
+model WebhookDelivery {
+  id          String   @id @map("_id") @default(auto()) @db.ObjectId
+  endpointId  String   @db.ObjectId
+  nonce       String
+  payloadHash String
+  status      String   @default("PENDING")
+  attempts    Int      @default(0)
+  receivedAt  DateTime @default(now())
+  processedAt DateTime?
+  error       String?
+  botsRouted  Int      @default(0)
+  botsFailed  Int      @default(0)
+  endpoint    WebhookEndpoint @relation(fields: [endpointId], references: [id])
+  @@index([status, receivedAt])
 }
 
 model ExchangeAccount {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @db.Uuid
-  exchange ExchangeName
-  marketType MarketType
-  label String
-  externalAccountId String?
-  credentialStatus CredentialStatus @default(PENDING)
-  tradingEnabled Boolean @default(false)
-  equity Decimal? @db.Decimal(36, 18)
-  peakEquity Decimal? @db.Decimal(36, 18)
-  lastConnectedAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  credentials ExchangeCredential[]
-  orders OrderIntent[]
-  positions Position[]
-  bots Bot[]
-  certifications CertificationRun[]
-  @@index([workspaceId, exchange])
-}
-
-model CertificationRun {
-  id String @id @default(uuid()) @db.Uuid
-  exchangeAccountId String @db.Uuid
-  credentialVersion Int
-  status String
-  checks Json
-  durationMs Int
-  startedAt DateTime @default(now())
-  completedAt DateTime
-  exchangeAccount ExchangeAccount @relation(fields: [exchangeAccountId], references: [id], onDelete: Cascade)
-  @@index([exchangeAccountId, startedAt])
-}
-
-model ExchangeCredential {
-  id String @id @default(uuid()) @db.Uuid
-  exchangeAccountId String @db.Uuid
-  version Int
-  keyId String
-  encryptedPayload Json
-  fingerprint String
-  permissions String[]
-  status CredentialStatus @default(PENDING)
-  activatedAt DateTime?
-  revokedAt DateTime?
-  createdAt DateTime @default(now())
-  exchangeAccount ExchangeAccount @relation(fields: [exchangeAccountId], references: [id], onDelete: Cascade)
-  @@unique([exchangeAccountId, version])
-}
-
-model RiskPolicy {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @unique @db.Uuid
-  maxDailyLoss Decimal @db.Decimal(36, 18)
-  maxWeeklyLoss Decimal @db.Decimal(36, 18)
-  maxMonthlyLoss Decimal @db.Decimal(36, 18)
-  maxDrawdownPercent Decimal @db.Decimal(10, 4)
-  maxConcurrentPositions Int
-  maxExposure Decimal @db.Decimal(36, 18)
-  maxLeverage Int
-  maxRiskPerTrade Decimal @db.Decimal(36, 18)
-  maxPositionSize Decimal @db.Decimal(36, 18)
-  consecutiveLossCooldown Int
-  tradingEnabled Boolean @default(true)
-  updatedAt DateTime @updatedAt
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-}
-
-model OrderIntent {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @db.Uuid
-  exchangeAccountId String @db.Uuid
-  idempotencyKey String
-  clientOrderId String
-  symbol String
-  side OrderSide
-  positionSide PositionSide
-  orderType String
-  marketType MarketType
-  quantity Decimal @db.Decimal(36, 18)
-  price Decimal? @db.Decimal(36, 18)
-  stopPrice Decimal? @db.Decimal(36, 18)
-  leverage Int?
-  marginMode MarginMode?
-  reduceOnly Boolean @default(false)
-  postOnly Boolean @default(false)
-  allocation Json?
-  state OrderState @default(RECEIVED)
-  rejectionReason String?
-  exchangeOrderId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
-  exchangeAccount ExchangeAccount @relation(fields: [exchangeAccountId], references: [id], onDelete: Restrict)
-  executions Execution[]
-  @@unique([workspaceId, idempotencyKey])
-  @@unique([exchangeAccountId, clientOrderId])
-  @@index([workspaceId, state, createdAt])
-}
-
-model Execution {
-  id String @id @default(uuid()) @db.Uuid
-  orderIntentId String @db.Uuid
-  exchangeExecutionId String
-  quantity Decimal @db.Decimal(36, 18)
-  price Decimal @db.Decimal(36, 18)
-  fee Decimal @db.Decimal(36, 18)
-  feeAsset String?
-  executedAt DateTime
-  createdAt DateTime @default(now())
-  orderIntent OrderIntent @relation(fields: [orderIntentId], references: [id], onDelete: Restrict)
-  @@unique([orderIntentId, exchangeExecutionId])
-}
-
-model Position {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @db.Uuid
-  exchangeAccountId String @db.Uuid
-  symbol String
-  side PositionSide
-  marginMode MarginMode
-  quantity Decimal @db.Decimal(36, 18)
-  averageEntryPrice Decimal @db.Decimal(36, 18)
-  markPrice Decimal @db.Decimal(36, 18)
-  liquidationPrice Decimal? @db.Decimal(36, 18)
-  leverage Int
-  unrealizedPnl Decimal @db.Decimal(36, 18)
-  realizedPnl Decimal @db.Decimal(36, 18)
-  updatedAt DateTime @updatedAt
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
-  exchangeAccount ExchangeAccount @relation(fields: [exchangeAccountId], references: [id], onDelete: Restrict)
-  @@unique([exchangeAccountId, symbol, side])
-  @@index([workspaceId, updatedAt])
+  id          String   @id @map("_id") @default(auto()) @db.ObjectId
+  exchange    String
+  marketType  String
+  label       String?
+  apiKey      String
+  apiSecret   String
+  isPrimary   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  bots        Bot[]
+  @@index([isPrimary])
 }
 
 model Bot {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @db.Uuid
-  exchangeAccountId String @db.Uuid
-  name String
-  type BotType
-  status BotStatus @default(DRAFT)
-  activeVersion Int @default(1)
-  schedule String?
-  config Json
-  lastHeartbeatAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  exchangeAccount ExchangeAccount @relation(fields: [exchangeAccountId], references: [id], onDelete: Restrict)
-  versions BotVersion[]
-  runs BotRun[]
-  @@index([workspaceId, status])
+  id                String           @id @map("_id") @default(auto()) @db.ObjectId
+  name              String
+  type              String           @default("WEBHOOK")
+  status            String           @default("ACTIVE")
+  activeVersion     Int              @default(1)
+  config            Json
+  exchangeAccountId String?          @db.ObjectId
+  webhookId         String?          @unique @db.ObjectId
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  exchangeAccount   ExchangeAccount? @relation(fields: [exchangeAccountId], references: [id])
+  webhook           WebhookEndpoint? @relation(fields: [webhookId], references: [id])
+  versions          BotVersion[]
+  runs              BotRun[]
 }
 
 model BotVersion {
-  id String @id @default(uuid()) @db.Uuid
-  botId String @db.Uuid
-  version Int
-  config Json
-  checksum String
-  createdBy String @db.Uuid
+  id        String   @id @map("_id") @default(auto()) @db.ObjectId
+  botId     String   @db.ObjectId
+  version   Int
+  config    Json
+  checksum  String
   createdAt DateTime @default(now())
-  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+  bot       Bot      @relation(fields: [botId], references: [id])
   @@unique([botId, version])
 }
 
 model BotRun {
-  id String @id @default(uuid()) @db.Uuid
-  botId String @db.Uuid
+  id        String   @id @map("_id") @default(auto()) @db.ObjectId
+  botId     String   @db.ObjectId
   startedAt DateTime @default(now())
   stoppedAt DateTime?
-  status BotStatus
-  metrics Json
-  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+  status    String
+  metrics   Json
+  bot       Bot      @relation(fields: [botId], references: [id])
   @@index([botId, startedAt])
 }
 
-model WebhookEndpoint {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @db.Uuid
-  name String
-  tokenHash String
-  encryptedSigningSecret Json
-  active Boolean @default(true)
-  createdAt DateTime @default(now())
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  deliveries WebhookDelivery[]
+model OrderIntent {
+  id              String      @id @map("_id") @default(auto()) @db.ObjectId
+  idempotencyKey  String
+  clientOrderId   String
+  symbol          String
+  side            String
+  positionSide    String
+  orderType       String
+  marketType      String
+  quantity        String
+  price           String?
+  stopPrice       String?
+  leverage        Int?
+  marginMode      String?
+  reduceOnly      Boolean     @default(false)
+  postOnly        Boolean     @default(false)
+  allocation      Json?
+  state           String      @default("QUEUED")
+  rejectionReason String?
+  exchangeOrderId String?
+  exchangeAccountId String? @db.ObjectId
+  source          Json?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  executions      Execution[]
+  @@unique([idempotencyKey])
+  @@index([state, createdAt])
 }
 
-model WebhookDelivery {
-  id String @id @default(uuid()) @db.Uuid
-  endpointId String @db.Uuid
-  nonce String
-  payloadHash String
-  status DeliveryStatus @default(PENDING)
-  attempts Int @default(0)
-  receivedAt DateTime @default(now())
-  processedAt DateTime?
-  error String?
-  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
-  @@unique([endpointId, nonce])
-  @@index([status, receivedAt])
+model Execution {
+  id                  String      @id @map("_id") @default(auto()) @db.ObjectId
+  orderIntentId       String      @db.ObjectId
+  exchangeExecutionId String
+  quantity            String
+  price               String
+  fee                 String      @default("0")
+  feeAsset            String?
+  executedAt          DateTime    @default(now())
+  createdAt           DateTime    @default(now())
+  orderIntent         OrderIntent @relation(fields: [orderIntentId], references: [id])
+  @@unique([orderIntentId, exchangeExecutionId])
+}
+
+model Position {
+  id                String   @id @map("_id") @default(auto()) @db.ObjectId
+  symbol            String
+  side              String
+  marginMode        String   @default("ISOLATED")
+  quantity          String
+  averageEntryPrice String
+  markPrice         String
+  liquidationPrice  String?
+  leverage          Int      @default(1)
+  unrealizedPnl     String
+  realizedPnl       String
+  updatedAt         DateTime @updatedAt
+  @@unique([symbol, side])
 }
 
 model Notification {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @db.Uuid
-  channel String
-  severity Severity @default(INFO)
-  title String
-  message String?
-  payload Json?
-  readAt DateTime?
+  id        String   @id @map("_id") @default(auto()) @db.ObjectId
+  channel   String
+  severity  String   @default("INFO")
+  title     String
+  message   String?
+  payload   Json?
+  readAt    DateTime?
   createdAt DateTime @default(now())
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  @@index([workspaceId, createdAt])
-}
-
-model McpClient {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @db.Uuid
-  name String
-  tokenHash String @unique
-  allowedTools String[]
-  allowedExchangeAccountIds String[]
-  allowedSymbols String[]
-  maxLeverage Int
-  maxNotional Decimal @db.Decimal(36, 18)
-  expiresAt DateTime
-  revokedAt DateTime?
-  createdAt DateTime @default(now())
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  invocations McpInvocation[]
-  @@index([workspaceId, expiresAt])
-}
-
-model McpInvocation {
-  id String @id @default(uuid()) @db.Uuid
-  clientId String @db.Uuid
-  tool String
-  argumentsHash String
-  decision String
-  resultCode String
-  latencyMs Int
-  correlationId String
-  invokedAt DateTime @default(now())
-  client McpClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  @@index([clientId, invokedAt])
-}
-
-model AuditEvent {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String? @db.Uuid
-  actorUserId String? @db.Uuid
-  actorType String
-  action String
-  resourceType String
-  resourceId String?
-  severity Severity @default(INFO)
-  correlationId String
-  ipAddress String?
-  userAgent String?
-  metadata Json
-  occurredAt DateTime @default(now())
-  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
-  actorUser User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
-  @@index([workspaceId, occurredAt])
-  @@index([action, occurredAt])
-}
-
-model OutboxEvent {
-  id String @id @default(uuid()) @db.Uuid
-  aggregateType String
-  aggregateId String
-  eventType String
-  payload Json
-  occurredAt DateTime @default(now())
-  publishedAt DateTime?
-  attempts Int @default(0)
-  @@index([publishedAt, occurredAt])
-}
-
-model IdempotencyRecord {
-  id String @id @default(uuid()) @db.Uuid
-  workspaceId String @db.Uuid
-  key String
-  requestHash String
-  responseStatus Int?
-  responseBody Json?
-  expiresAt DateTime
-  createdAt DateTime @default(now())
-  @@unique([workspaceId, key])
-  @@index([expiresAt])
+  @@index([createdAt])
 }

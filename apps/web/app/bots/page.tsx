@@ -1,10 +1,9 @@
 'use client';
 
-import { Bot, CirclePlus, LayoutDashboard, LogOut, Pause, Play, RefreshCw, Settings2, ShieldCheck, Square, X } from 'lucide-react';
-import Link from 'next/link';
+import { Bot, CirclePlus, Copy, Pause, Play, RefreshCw, Settings2, Square, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import { NexusLogo } from '../logo';
-import { ApiHttpError, apiFetch, clearSession, loadSession, login, type AuthSession } from '../../lib/session';
+import AppShell, { type ShellContext } from '../components/AppShell';
+import { ApiHttpError, apiFetch, type AuthSession } from '../../lib/session';
 
 type BotStatus = 'DRAFT' | 'ACTIVE' | 'PAUSED' | 'STOPPED' | 'ERROR';
 type Allocation = { mode: 'PERCENT_EQUITY' | 'PERCENT_MAX_EQUITY' | 'FIXED_AMOUNT' | 'RISK_PERCENT'; percent?: number; amount?: string };
@@ -18,8 +17,8 @@ type BotConfig = {
   actions?: string[];
 };
 
-type ExchangeAccount = { id: string; exchange: string; label: string; marketType: string; tradingEnabled: boolean; credentialStatus: string };
 type Market = { symbol: string; base: string; quote: string; type: string; active: boolean };
+type ExchangeAccountRef = { id: string; label: string | null; exchange: string; marketType: string; isPrimary?: boolean };
 type BotSummary = {
   id: string;
   name: string;
@@ -29,13 +28,16 @@ type BotSummary = {
   config: BotConfig;
   createdAt: string;
   updatedAt: string;
-  exchangeAccount: { exchange: string; label: string };
+  exchangeAccount?: ExchangeAccountRef | null;
+  webhook?: { id: string; active: boolean } | null;
 };
 type BotVersion = { id: string; version: number; config: BotConfig; checksum: string; createdAt: string };
 type BotRun = { id: string; startedAt: string; stoppedAt: string | null; status: string; metrics: Record<string, unknown> };
-type BotDetail = BotSummary & { exchangeAccount: { exchange: string; label: string; marketType: string }; versions: BotVersion[]; runs: BotRun[] };
+type BotDetail = BotSummary & { versions: BotVersion[]; runs: BotRun[] };
 
-type Notice = { tone: 'success' | 'error' | 'info'; message: string } | null;
+type CreateResult = { bot: BotSummary; webhook: { id: string; url: string; signingSecret: string } };
+type SecretReveal = { botName: string; url: string; signingSecret: string };
+
 type EditTarget = { id: string; name: string; config: BotConfig };
 
 const ACTION_OPTIONS = ['BUY', 'SELL', 'LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT', 'REVERSE', 'PARTIAL_EXIT'] as const;
@@ -46,6 +48,19 @@ const STATUS_TONES: Record<BotStatus, string> = { ACTIVE: 'ok', PAUSED: 'warn', 
 function formatTime(iso: string | null): string {
   if (!iso) return '—';
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function webhookUrl(id: string): string {
+  return `${window.location.origin}/api/webhooks/tradingview/${id}`;
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function formatAllocation(allocation?: Allocation): string {
@@ -66,33 +81,9 @@ function formatConfig(config: BotConfig): string {
   return parts.join(' · ');
 }
 
-function SymbolPicker({ accounts, selected, onChange }: { accounts: ExchangeAccount[]; selected: string[]; onChange: (next: string[]) => void }) {
+function SymbolPicker({ markets, selected, onChange }: { markets: Market[] | null; selected: string[]; onChange: (next: string[]) => void }) {
   const [query, setQuery] = useState('');
-  const [markets, setMarkets] = useState<Market[] | null>(null);
   const [custom, setCustom] = useState('');
-
-  useEffect(() => {
-    let cancelled = false;
-    const session = loadSession();
-    if (!session) return;
-    Promise.all(
-      accounts.map((account) =>
-        apiFetch<{ markets: Market[] }>(`/exchange-accounts/${account.id}/markets`, session)
-          .then((data) => data.markets)
-          .catch(() => [] as Market[])
-      )
-    )
-      .then((lists) => {
-        if (cancelled) return;
-        const seen = new Set<string>();
-        const merged: Market[] = [];
-        for (const list of lists) for (const market of list) if (!seen.has(market.symbol)) { seen.add(market.symbol); merged.push(market); }
-        merged.sort((a, b) => a.symbol.localeCompare(b.symbol));
-        setMarkets(merged);
-      })
-      .catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [accounts]);
 
   const toggle = (symbol: string) => onChange(selected.includes(symbol) ? selected.filter((item) => item !== symbol) : [...selected, symbol]);
   const queryUpper = query.trim().toUpperCase();
@@ -109,7 +100,7 @@ function SymbolPicker({ accounts, selected, onChange }: { accounts: ExchangeAcco
 
   return (
     <label className="symbol-picker">
-      <span>Symbols — {selected.length} selected {accounts.length > 1 ? `(from ${accounts.length} accounts)` : ''}</span>
+      <span>Symbols — {selected.length} selected</span>
       <div className="symbol-tools">
         <input className="symbol-search" onChange={(event) => setQuery(event.target.value)} placeholder="Search pairs (BTC, ETH, DOGE…)" type="search" value={query} />
         <div className="symbol-actions">
@@ -119,7 +110,7 @@ function SymbolPicker({ accounts, selected, onChange }: { accounts: ExchangeAcco
         </div>
       </div>
       <div className="symbol-list">
-        {!markets && <p className="muted small">Loading markets from your verified accounts…</p>}
+        {!markets && <p className="muted small">Loading markets from the exchange…</p>}
         {markets && markets.length === 0 && <p className="muted small">No markets returned by the exchange.</p>}
         {markets && matching.length === 0 && queryUpper && <p className="muted small">No matching markets.</p>}
         {orphaned.map((symbol) => (
@@ -146,45 +137,54 @@ function SymbolPicker({ accounts, selected, onChange }: { accounts: ExchangeAcco
 }
 
 export default function BotsConsole() {
-  const [session, setSession] = useState<AuthSession | null>(null);
-  const [booting, setBooting] = useState(true);
-  const [email, setEmail] = useState('cert@example.com');
-  const [password, setPassword] = useState('');
-  const [submittingLogin, setSubmittingLogin] = useState(false);
-  const [accounts, setAccounts] = useState<ExchangeAccount[]>([]);
+  return (
+    <AppShell active="bots">
+      {({ session, setNotice, signOut }) => <BotsBody session={session} setNotice={setNotice} signOut={signOut} />}
+    </AppShell>
+  );
+}
+
+function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNotice: ShellContext['setNotice']; signOut: ShellContext['signOut'] }) {
+  const [markets, setMarkets] = useState<Market[] | null>(null);
+  const [accounts, setAccounts] = useState<ExchangeAccountRef[]>([]);
   const [bots, setBots] = useState<BotSummary[]>([]);
   const [selected, setSelected] = useState<BotDetail | null>(null);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [secretReveal, setSecretReveal] = useState<SecretReveal | null>(null);
   const [symbols, setSymbols] = useState<string[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState('');
   const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState<Notice>(null);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    const stored = loadSession();
-    setSession(stored);
-    setBooting(false);
-  }, []);
+  const loadMarkets = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ symbols: Market[] }>('/api/markets?quote=USDT', session);
+      setMarkets(data.symbols);
+    } catch {
+      setMarkets(null);
+    }
+  }, [session]);
 
   const loadAccounts = useCallback(async () => {
     try {
-      const data = await apiFetch<ExchangeAccount[]>('/exchange-accounts', loadSession());
-      setAccounts(data.filter((account) => account.tradingEnabled && account.credentialStatus === 'VERIFIED'));
+      const data = await apiFetch<{ accounts: ExchangeAccountRef[] }>('/api/exchange-accounts', session);
+      setAccounts(data.accounts);
+      const primary = data.accounts.find((account) => account.isPrimary) ?? data.accounts[0];
+      setSelectedAccountId(primary?.id ?? '');
     } catch {
-      setNotice({ tone: 'info', message: 'Could not load exchange accounts.' });
+      setAccounts([]);
     }
-  }, []);
+  }, [session]);
 
   const loadBots = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiFetch<BotSummary[]>('/bots', loadSession());
-      setBots(data);
+      const data = await apiFetch<{ bots: BotSummary[] }>('/api/bots', session);
+      setBots(data.bots);
     } catch (error) {
       if (error instanceof ApiHttpError && error.status === 401) {
-        clearSession();
-        setSession(null);
+        signOut();
         setNotice({ tone: 'error', message: 'Session expired — sign in again.' });
       } else {
         setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Failed to load bots.' });
@@ -192,43 +192,28 @@ export default function BotsConsole() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [session, setNotice, signOut]);
 
   const loadDetail = useCallback(async (botId: string) => {
     try {
-      setSelected(await apiFetch<BotDetail>(`/bots/${botId}`, loadSession()));
+      const data = await apiFetch<{ bot: BotDetail }>(`/api/bots/${botId}`, session);
+      setSelected(data.bot);
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Failed to load bot detail.' });
     }
-  }, []);
+  }, [session, setNotice]);
 
-  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setSubmittingLogin(true);
-    try {
-      const nextSession = await login(email, password);
-      setSession(nextSession);
-      setNotice({ tone: 'success', message: `Signed in as ${nextSession.user.email}.` });
-      void loadAccounts();
-      void loadBots();
-    } catch (error) {
-      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Login failed.' });
-    } finally {
-      setSubmittingLogin(false);
-    }
-  };
-
-  const logout = () => {
-    clearSession();
-    setSession(null);
-    setBots([]);
-    setSelected(null);
-    setNotice(null);
-  };
+  useEffect(() => {
+    void loadBots();
+    void loadMarkets();
+    void loadAccounts();
+  }, [loadBots, loadMarkets, loadAccounts]);
 
   const openCreate = () => {
     setEditTarget(null);
     setSymbols([]);
+    const primary = accounts.find((account) => account.isPrimary) ?? accounts[0];
+    setSelectedAccountId(primary?.id ?? '');
     setCreateOpen(true);
     setNotice(null);
   };
@@ -255,6 +240,11 @@ export default function BotsConsole() {
       setSaving(false);
       return;
     }
+    if (!editTarget && !selectedAccountId) {
+      setNotice({ tone: 'error', message: 'Choose the exchange API this bot trades with.' });
+      setSaving(false);
+      return;
+    }
     const config: BotConfig = { symbols };
     const allocationMode = String(form.get('allocationMode') ?? 'NONE');
     const allocationValue = String(form.get('allocationValue') ?? '').trim();
@@ -278,13 +268,17 @@ export default function BotsConsole() {
 
     try {
       if (editTarget) {
-        await apiFetch(`/bots/${editTarget.id}/config`, loadSession(), { method: 'PATCH', body: { config } });
+        await apiFetch(`/api/bots/${editTarget.id}`, session, { method: 'PATCH', body: { config } });
         setNotice({ tone: 'success', message: `Bot "${editTarget.name}" updated (new version created).` });
       } else {
-        const accountId = String(form.get('exchangeAccountId') ?? '');
         const name = String(form.get('name') ?? '').trim();
-        const bot = await apiFetch<BotSummary>('/bots', loadSession(), { method: 'POST', body: { name, exchangeAccountId: accountId, config } });
-        setNotice({ tone: 'success', message: `Bot "${bot.name}" created and ACTIVE.` });
+        const result = await apiFetch<CreateResult>('/api/bots', session, { method: 'POST', body: { name, exchangeAccountId: selectedAccountId, config } });
+        setSecretReveal({
+          botName: result.bot.name,
+          url: webhookUrl(result.webhook.id),
+          signingSecret: result.webhook.signingSecret,
+        });
+        setNotice({ tone: 'success', message: `Bot "${result.bot.name}" created and ACTIVE.` });
       }
       setCreateOpen(false);
       await loadBots();
@@ -299,7 +293,7 @@ export default function BotsConsole() {
   const setBotStatus = async (bot: BotSummary, action: 'pause' | 'resume' | 'stop') => {
     if (!session) return;
     try {
-      await apiFetch(`/bots/${bot.id}/${action}`, loadSession(), { method: 'POST', body: {} });
+      await apiFetch(`/api/bots/${bot.id}/${action}`, session, { method: 'POST', body: {} });
       const verb = action === 'pause' ? 'paused' : action === 'resume' ? 'resumed' : 'stopped';
       setNotice({ tone: 'success', message: `Bot "${bot.name}" ${verb}.` });
       await loadBots();
@@ -309,53 +303,10 @@ export default function BotsConsole() {
     }
   };
 
-  if (booting) {
-    return <main className="shell center-shell"><p className="muted">Loading sessions…</p></main>;
-  }
-
-  if (!session) {
-    return (
-      <main className="login-shell">
-        <section className="login-card">
-          <div className="login-brand">
-            <NexusLogo className="brand-logo" />
-            <div><b>NexusTrade</b><small>Bots console</small></div>
-          </div>
-          <h1>Sign in</h1>
-          <p className="muted">Authenticate to manage webhook trading bots.</p>
-          <form onSubmit={handleLogin}>
-            <label>Email<input autoComplete="email" onChange={(event) => setEmail(event.target.value)} required type="email" value={email} /></label>
-            <label>Password<input autoComplete="current-password" minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
-            <button className="primary" disabled={submittingLogin} type="submit">{submittingLogin ? 'Signing in…' : 'Sign in'}</button>
-          </form>
-          {notice && <div className={`notice-bar ${notice.tone}`} role="status"><span>{notice.message}</span><button aria-label="Dismiss" onClick={() => setNotice(null)} type="button"><X size={16} /></button></div>}
-          <p className="muted small">Demo: cert@example.com / supersecret123</p>
-        </section>
-      </main>
-    );
-  }
-
   const prefill = editTarget?.config;
 
   return (
-    <main className="shell">
-      <aside>
-        <Link className="brand brand-button" href="/">
-          <NexusLogo className="brand-logo" />
-          <span><b>NexusTrade</b><small>Bots console</small></span>
-        </Link>
-        <nav aria-label="Bot console navigation">
-          <Link className="nav-link" href="/dashboard"><LayoutDashboard size={15} /> Dashboard</Link>
-          <button className="active" type="button">Bots</button>
-        </nav>
-        <div className="security user-card">
-          <ShieldCheck size={18} />
-          <span><b>{session.user.email}</b><small>{session.workspace?.name ?? 'My workspace'}</small></span>
-        </div>
-        <button className="logout" onClick={logout} type="button"><LogOut size={16} /> Sign out</button>
-      </aside>
-
-      <section className="content">
+    <>
         <header>
           <div>
             <p className="eyebrow">AUTOMATED TRADING</p>
@@ -365,29 +316,39 @@ export default function BotsConsole() {
           <button className="primary" onClick={openCreate} type="button"><CirclePlus size={17} /> New bot</button>
         </header>
 
-        {notice && (
-          <div className={`notice-bar ${notice.tone}`} role="status">
-            <span>{notice.message}</span>
-            <button aria-label="Dismiss notification" onClick={() => setNotice(null)} type="button"><X size={16} /></button>
-          </div>
-        )}
-
         <div className="bot-layout">
           <article className="bot-list-card">
             <div className="card-head">
-              <div><p>WORKSPACE BOTS</p><h2>{bots.length} configured</h2></div>
+              <div><p>BOTS</p><h2>{bots.length} configured</h2></div>
               <button className="secondary" disabled={loading} onClick={() => void loadBots()} type="button"><RefreshCw size={14} /> Refresh</button>
             </div>
             <div className="table-scroll">
               {!loading && bots.length === 0 && <p className="muted empty">No bots yet — create one to connect a TradingView webhook.</p>}
               {bots.length > 0 && (
                 <table>
-                  <thead><tr><th>Bot</th><th>Account</th><th>Status</th><th>Version</th><th>Config</th><th>Actions</th></tr></thead>
+                  <thead><tr><th>Bot</th><th>Webhook</th><th>Status</th><th>Version</th><th>Config</th><th>Actions</th></tr></thead>
                   <tbody>
                     {bots.map((bot) => (
                       <tr className={selected?.id === bot.id ? 'selected-row' : ''} key={bot.id} onClick={() => void loadDetail(bot.id)}>
-                        <td><b>{bot.name}</b><small className="muted block">{bot.type}</small></td>
-                        <td>{bot.exchangeAccount.label}<small className="muted block">{bot.exchangeAccount.exchange}</small></td>
+                        <td><b>{bot.name}</b><small className="muted block">{bot.type}{bot.exchangeAccount ? ` · ${bot.exchangeAccount.label ?? bot.exchangeAccount.exchange} ${bot.exchangeAccount.marketType}` : ''}</small></td>
+                        <td className="webhook-cell">
+                          {bot.webhook ? (
+                            <button
+                              className="wh-copy"
+                              onClick={async (event) => {
+                                event.stopPropagation();
+                                const copied = await copyText(webhookUrl(bot.webhook!.id));
+                                setNotice(copied ? { tone: 'success', message: `Webhook URL for "${bot.name}" copied.` } : { tone: 'error', message: 'Could not copy — select the URL manually.' });
+                              }}
+                              title="Copy webhook URL"
+                              type="button"
+                            >
+                              <code>/{bot.webhook.id.slice(0, 8)}</code><Copy size={13} />
+                            </button>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
                         <td><span className={`status-label ${STATUS_TONES[bot.status]}`}>{bot.status}</span></td>
                         <td>v{bot.activeVersion}</td>
                         <td className="config-cell" title={formatConfig(bot.config)}>{formatConfig(bot.config)}</td>
@@ -411,13 +372,25 @@ export default function BotsConsole() {
                 <div>
                   <p>BOT DETAIL</p>
                   <h2>{selected.name}</h2>
-                  <small className="muted">v{selected.activeVersion} · {selected.exchangeAccount.marketType} · {selected.exchangeAccount.label}</small>
+                  <small className="muted">v{selected.activeVersion}</small>
                 </div>
                 <button aria-label="Close detail" className="icon-btn" onClick={() => setSelected(null)} type="button"><X size={16} /></button>
               </div>
               <p className="muted small config-line">{formatConfig(selected.config)}</p>
+              {selected.webhook && (
+                <div className="bot-webhook">
+                  <p className="eyebrow">WEBHOOK ENDPOINT</p>
+                  <div className="wh-row">
+                    <code className="wh-url">{webhookUrl(selected.webhook.id)}</code>
+                    <button className="secondary sm" onClick={() => void copyText(webhookUrl(selected.webhook!.id))} type="button"><Copy size={14} /> Copy URL</button>
+                  </div>
+                  <p className="muted small">
+                    TradingView strategy alerts sent to this URL run <b>only this bot</b> · leverage {selected.config.leverage ?? '1'}x
+                  </p>
+                </div>
+              )}
               <h3>Runs <span className="muted">(last {selected.runs.length})</span></h3>
-              {selected.runs.length === 0 && <p className="muted empty">No runs yet — the worker records a run for every routed webhook signal.</p>}
+              {selected.runs.length === 0 && <p className="muted empty">No runs yet — every routed webhook signal records a run.</p>}
               <div className="timeline">
                 {selected.runs.map((run) => (
                   <div className="timeline-item" key={run.id}>
@@ -430,7 +403,7 @@ export default function BotsConsole() {
                       </div>
                       <div className="timeline-meta">
                         {typeof run.metrics.symbol === 'string' && <span>{run.metrics.symbol}</span>}
-                        {typeof run.metrics.price === 'number' && <span>mark {String(run.metrics.price)}</span>}
+                        {typeof run.metrics.price === 'string' && <span>mark {run.metrics.price}</span>}
                         {Array.isArray(run.metrics.orders) && <span>{run.metrics.orders.length} orders</span>}
                         {Array.isArray(run.metrics.skipped) && run.metrics.skipped.length > 0 && <span className="loss">{run.metrics.skipped.length} skipped</span>}
                         {typeof run.metrics.error === 'string' && <span className="loss">{run.metrics.error}</span>}
@@ -455,7 +428,29 @@ export default function BotsConsole() {
             <article className="bot-detail-card placeholder"><Bot size={28} /><p>Select a bot to view its runs timeline and version history.</p></article>
           )}
         </div>
-      </section>
+
+      {secretReveal && (
+        <div className="modal-backdrop" onMouseDown={() => setSecretReveal(null)} role="presentation">
+          <section aria-modal="true" className="modal" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+            <div className="card-head">
+              <div><p className="eyebrow">ONE-TIME SECRET</p><h2>Webhook URL for “{secretReveal.botName}”</h2></div>
+              <button aria-label="Close" onClick={() => setSecretReveal(null)} type="button"><X size={18} /></button>
+            </div>
+            <p className="muted small">Copy these into your TradingView strategy alert. The signing secret is shown <b>only now</b> — it cannot be retrieved later.</p>
+            <label className="secret-field">
+              <span>Webhook URL</span>
+              <div className="secret-box"><code>{secretReveal.url}</code><button className="secondary sm" onClick={() => void copyText(secretReveal.url)} type="button"><Copy size={14} /> Copy</button></div>
+            </label>
+            <label className="secret-field">
+              <span>Signing secret</span>
+              <div className="secret-box"><code>{secretReveal.signingSecret}</code><button className="secondary sm" onClick={() => void copyText(secretReveal.signingSecret)} type="button"><Copy size={14} /> Copy</button></div>
+            </label>
+            <div className="modal-actions">
+              <button className="primary" onClick={() => setSecretReveal(null)} type="button">Done</button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {createOpen && (
         <div className="modal-backdrop" onMouseDown={() => setCreateOpen(false)} role="presentation">
@@ -468,15 +463,26 @@ export default function BotsConsole() {
               {!editTarget && (
                 <>
                   <label>Name<input minLength={1} name="name" placeholder="e.g. btc-breakout" required /></label>
-                  <label>Trading account (verified + trading enabled)
-                    <select name="exchangeAccountId" required>
-                      {accounts.length === 0 && <option value="">No verified accounts</option>}
-                      {accounts.map((account) => <option key={account.id} value={account.id}>{account.label} · {account.exchange} · {account.marketType}</option>)}
+                  <label>
+                    Exchange API (credentials)
+                    <select name="exchangeAccountId" onChange={(event) => setSelectedAccountId(event.target.value)} required value={selectedAccountId}>
+                      {accounts.length === 0 && <option value="">No APIs — add one in Exchange APIs first</option>}
+                      {accounts.map((account) => (
+                        <option key={account.id} value={account.id}>
+                          {account.label ?? `${account.exchange} ${account.marketType}`}{account.isPrimary ? ' (primary)' : ''}
+                        </option>
+                      ))}
                     </select>
                   </label>
                 </>
               )}
-              <SymbolPicker accounts={accounts} onChange={setSymbols} selected={symbols} />
+              {editTarget && (
+                <p className="muted small pad-top">
+                  Trading API: <b>{editTarget.config ? '—' : ''}</b>
+                  {selected && selected.exchangeAccount ? `${selected.exchangeAccount.label ?? selected.exchangeAccount.exchange} ${selected.exchangeAccount.marketType}` : 'bound at creation'}
+                </p>
+              )}
+              <SymbolPicker markets={markets} onChange={setSymbols} selected={symbols} />
               <div className="form-row">
                 <label>Allocation mode<select defaultValue={prefill?.allocation?.mode ?? 'NONE'} name="allocationMode">{ALLOCATION_OPTIONS.map((mode) => <option key={mode} value={mode}>{mode === 'NONE' ? 'Use signal size' : mode}</option>)}</select></label>
                 <label>Amount / percent<input defaultValue={prefill?.allocation?.mode === 'FIXED_AMOUNT' ? prefill.allocation.amount : prefill?.allocation?.percent ?? ''} min="0.001" name="allocationValue" step="any" type="number" /></label>
@@ -503,6 +509,6 @@ export default function BotsConsole() {
           </section>
         </div>
       )}
-    </main>
+    </>
   );
 }

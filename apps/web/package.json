@@ -1,6 +1,32 @@
 {
-  "name": "@platform/web", "version": "1.0.0", "private": true,
-  "scripts": { "build": "next build", "dev": "next dev -p 3000", "start": "next start -p 3000", "lint": "eslint app --max-warnings=0", "typecheck": "tsc --noEmit", "test": "vitest run --passWithNoTests", "test:coverage": "vitest run --passWithNoTests" },
-  "dependencies": { "next": "^15.3.0", "react": "^19.1.0", "react-dom": "^19.1.0", "lucide-react": "^0.487.0" },
-  "devDependencies": { "@types/react": "^19.1.0", "@types/react-dom": "^19.1.0" }
+  "name": "@platform/web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev -p 3000",
+    "start": "next start -p 3000",
+    "lint": "eslint app --max-warnings=0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:coverage": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.9.0",
+    "@platform/commands": "*",
+    "@platform/contracts": "*",
+    "@platform/database": "*",
+    "@platform/exchange-core": "*",
+    "@platform/security": "*",
+    "lucide-react": "^0.487.0",
+    "next": "^15.3.0",
+    "protobufjs": "^7.5.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0"
+  }
 }

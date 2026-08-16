@@ -14,8 +14,8 @@
     "test:coverage": "vitest run --coverage --passWithNoTests"
   },
   "dependencies": {
-    "@platform/contracts": "workspace:*",
-    "@platform/exchange-core": "workspace:*",
+    "@platform/contracts": "*",
+    "@platform/exchange-core": "*",
     "ccxt": "^4.4.77"
   }
 }

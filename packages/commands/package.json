@@ -8,15 +8,15 @@
   "exports": { ".": { "types": "./src/index.ts", "import": "./dist/index.js" } },
   "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src --max-warnings=0", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run --passWithNoTests", "test:coverage": "vitest run --coverage --passWithNoTests" },
   "dependencies": {
-    "@platform/contracts": "workspace:*",
-    "@platform/database": "workspace:*",
-    "@platform/exchange-adapters": "workspace:*",
-    "@platform/exchange-core": "workspace:*",
-    "@platform/risk-engine": "workspace:*",
-    "@platform/security": "workspace:*",
-    "@platform/trading-core": "workspace:*",
-    "bullmq": "^5.46.1",
-    "ioredis": "^5.6.0",
+    "@platform/bot-engine": "*",
+    "@platform/contracts": "*",
+    "@platform/database": "*",
+    "@platform/exchange-adapters": "*",
+    "@platform/exchange-core": "*",
+    "@platform/risk-engine": "*",
+    "@platform/security": "*",
+    "@platform/trading-core": "*",
+    "@platform/webhook": "*",
     "zod": "^3.24.2"
   }
 }

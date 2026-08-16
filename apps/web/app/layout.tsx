@@ -4,10 +4,10 @@ import './styles.css';
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
   title: {
-    default: 'NexusTrade Command Center',
+    default: 'NexusTrade Trading Terminal',
     template: '%s · NexusTrade',
   },
-  description: 'Secure multi-exchange crypto trading operations, risk controls, and automation.',
+  description: 'Bybit execution, portfolio risk controls, and automated trading operations.',
   applicationName: 'NexusTrade',
   icons: {
     icon: [{ url: '/icon.svg', type: 'image/svg+xml' }],
@@ -19,14 +19,14 @@ export const metadata: Metadata = {
     locale: 'en_US',
     url: '/',
     siteName: 'NexusTrade',
-    title: 'NexusTrade Command Center',
-    description: 'Secure multi-exchange crypto trading operations, risk controls, and automation.',
+    title: 'NexusTrade Trading Terminal',
+    description: 'Bybit execution, portfolio risk controls, and automated trading operations.',
     images: [{ url: '/opengraph-image.png', width: 1200, height: 630, alt: 'NexusTrade Command Center' }],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'NexusTrade Command Center',
-    description: 'Secure multi-exchange crypto trading operations, risk controls, and automation.',
+    title: 'NexusTrade Trading Terminal',
+    description: 'Bybit execution, portfolio risk controls, and automated trading operations.',
     images: ['/opengraph-image.png'],
   },
 };

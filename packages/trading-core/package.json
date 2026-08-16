@@ -7,5 +7,5 @@
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./src/index.ts", "import": "./dist/index.js" } },
   "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src --max-warnings=0", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run", "test:coverage": "vitest run --coverage" },
-  "dependencies": { "@platform/contracts": "workspace:*", "decimal.js": "^10.5.0" }
+  "dependencies": { "@platform/contracts": "*", "decimal.js": "^10.5.0" }
 }

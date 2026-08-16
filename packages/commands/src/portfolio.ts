@@ -1,9 +1,9 @@
-import { prisma, type Prisma, type ExchangeAccount } from '@platform/database';
+import { prisma } from '@platform/database';
 import { ExchangeError, type MarketInfo } from '@platform/exchange-core';
-import { connectAccount } from './orders.js';
+import { connectToAccount, getAccountConfig } from './account.js';
 
-export async function listExchangeMarkets(account: ExchangeAccount, quote?: string): Promise<MarketInfo[]> {
-  const { adapter } = await connectAccount(account);
+export async function listExchangeMarkets(quote?: string): Promise<MarketInfo[]> {
+  const { adapter } = await connectToAccount();
   try {
     const markets = await adapter.getMarkets();
     const filtered = quote ? markets.filter((market) => market.quote.toUpperCase() === quote.toUpperCase()) : markets;
@@ -13,54 +13,88 @@ export async function listExchangeMarkets(account: ExchangeAccount, quote?: stri
   }
 }
 
-export async function portfolioSummary(workspaceId: string) {
-  const accounts = await prisma.exchangeAccount.findMany({ where: { workspaceId } });
-  const totals: Record<string, { free: string; locked: string }> = {};
-  const accountSummaries = await Promise.all(
-    accounts.map(async (account) => {
-      try {
-        const { adapter, connection } = await connectAccount(account);
-        try {
-          const [balances, positions] = await Promise.all([adapter.getBalance(), adapter.getPositions()]);
-          for (const balance of balances) {
-            totals[balance.asset] = {
-              free: String(Number(totals[balance.asset]?.free ?? 0) + Number(balance.free)),
-              locked: String(Number(totals[balance.asset]?.locked ?? 0) + Number(balance.locked))
-            };
-          }
-          const unrealizedPnl = positions.reduce((sum, position) => sum + Number(position.unrealizedPnl), 0);
-          return { accountId: account.id, exchange: account.exchange, marketType: account.marketType, label: account.label, status: 'connected', serverTime: connection.serverTime, balances, positions, unrealizedPnl: String(unrealizedPnl) };
-        } finally {
-          await adapter.disconnect().catch(() => undefined);
-        }
-      } catch (error) {
-        return { accountId: account.id, exchange: account.exchange, marketType: account.marketType, label: account.label, status: 'unreachable', error: error instanceof ExchangeError ? error.code : error instanceof Error ? error.message : String(error) };
-      }
-    })
-  );
-  const orderCount = await prisma.orderIntent.count({ where: { workspaceId } });
-  return { totalValue: 'N/A (spot balances aggregated)', balances: Object.entries(totals).map(([asset, value]) => ({ asset, ...value })), accounts: accountSummaries, totalOrderCount: orderCount, generatedAt: new Date().toISOString() };
+export async function portfolioSummary() {
+  const config = await getAccountConfig();
+  try {
+    const { adapter, connection } = await connectToAccount();
+    try {
+      const [balances, positions] = await Promise.all([adapter.getBalance(), adapter.getPositions()]);
+      const unrealizedPnl = positions.reduce((sum, position) => sum + Number(position.unrealizedPnl), 0);
+      const orderCount = await prisma.orderIntent.count({});
+      return {
+        account: { exchange: config.exchange, marketType: config.marketType, label: config.label },
+        status: 'connected',
+        serverTime: connection.serverTime,
+        balances,
+        positions,
+        unrealizedPnl: String(unrealizedPnl),
+        totalOrderCount: orderCount,
+        generatedAt: new Date().toISOString()
+      };
+    } finally {
+      await adapter.disconnect().catch(() => undefined);
+    }
+  } catch (error) {
+    return {
+      account: { exchange: config.exchange, marketType: config.marketType, label: config.label },
+      status: 'unreachable',
+      error: error instanceof ExchangeError ? error.code : error instanceof Error ? error.message : String(error),
+      generatedAt: new Date().toISOString()
+    };
+  }
 }
 
-export async function portfolioPositions(workspaceId: string) {
-  const accounts = await prisma.exchangeAccount.findMany({ where: { workspaceId } });
-  return Promise.all(
-    accounts.map(async (account) => {
-      try {
-        const { adapter } = await connectAccount(account);
-        try {
-          const positions = await adapter.getPositions();
-          return { accountId: account.id, label: account.label, status: 'connected', positions };
-        } finally {
-          await adapter.disconnect().catch(() => undefined);
-        }
-      } catch (error) {
-        return { accountId: account.id, label: account.label, status: 'unreachable', error: error instanceof ExchangeError ? error.code : error instanceof Error ? error.message : String(error) };
-      }
-    })
-  );
+export async function portfolioPositions() {
+  const { adapter } = await connectToAccount();
+  try {
+    const positions = await adapter.getPositions();
+    return { status: 'connected', positions };
+  } finally {
+    await adapter.disconnect().catch(() => undefined);
+  }
 }
 
-export async function listWorkspaceOrders(workspaceId: string, take = 100): Promise<Prisma.OrderIntentGetPayload<{ include: { executions: true; exchangeAccount: { select: { exchange: true; label: true } } } }>[]> {
-  return prisma.orderIntent.findMany({ where: { workspaceId }, include: { executions: true, exchangeAccount: { select: { exchange: true, label: true } } }, orderBy: { createdAt: 'desc' }, take });
+export type RawExecution = {
+  id: string;
+  orderIntentId: string;
+  exchangeExecutionId: string;
+  quantity: string;
+  price: string;
+  fee: string;
+  feeAsset: string | null;
+  executedAt: Date;
+};
+
+export type ExecutionRow = RawExecution & { orderIntent: { symbol: string; side: string; positionSide: string; orderType: string; state: string; clientOrderId: string; source: unknown } };
+
+export async function listOrders(take = 100): Promise<Array<{ id: string; symbol: string; side: string; positionSide: string; orderType: string; quantity: string; price: string | null; stopPrice: string | null; state: string; rejectionReason: string | null; exchangeOrderId: string | null; clientOrderId: string; reduceOnly: boolean; source: unknown; createdAt: Date; updatedAt: Date; executions: RawExecution[] }>> {
+  return prisma.orderIntent.findMany({ include: { executions: true }, orderBy: { createdAt: 'desc' }, take });
+}
+
+export async function listExecutions(take = 100): Promise<Array<{ orderId: string; exchange: string; label: string; symbol: string; side: string; positionSide: string; orderType: string; state: string; clientOrderId: string; source: unknown; executionId: string; quantity: string; price: string; fee: string; feeAsset: string | null; executedAt: Date; createdAt: Date }>> {
+  const config = await getAccountConfig();
+  const executions = await prisma.execution.findMany({
+    include: { orderIntent: { select: { symbol: true, side: true, positionSide: true, orderType: true, state: true, clientOrderId: true, source: true } } },
+    orderBy: { executedAt: 'desc' },
+    take,
+  });
+  return executions.map((execution) => ({
+    orderId: execution.orderIntentId,
+    exchange: config.exchange,
+    label: config.label,
+    symbol: execution.orderIntent.symbol,
+    side: execution.orderIntent.side,
+    positionSide: execution.orderIntent.positionSide,
+    orderType: execution.orderIntent.orderType,
+    state: execution.orderIntent.state,
+    clientOrderId: execution.orderIntent.clientOrderId,
+    source: execution.orderIntent.source,
+    executionId: execution.id,
+    quantity: execution.quantity,
+    price: execution.price,
+    fee: execution.fee,
+    feeAsset: execution.feeAsset,
+    executedAt: execution.executedAt,
+    createdAt: execution.createdAt
+  }));
 }

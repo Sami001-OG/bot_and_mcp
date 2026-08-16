@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { CommandError, buildRiskContext, parseOrderBody } from './index.js';
+import { CommandError, buildRiskContext, parseOrderBody, type AccountConfig } from './index.js';
+
+const testConfig: AccountConfig = { id: 'acc-1', exchange: 'bybit', marketType: 'SPOT', label: 'test', apiKey: 'k', secret: 's' };
 
 describe('commands', () => {
   it('builds a risk context with zeroed defaults', () => {
@@ -14,25 +16,9 @@ describe('commands', () => {
     expect(context.enforceMinimumNotional).toBe(false);
   });
 
-  it('parses a valid order body with an explicit idempotency key', () => {
-    const parsed = parseOrderBody({
-      exchangeAccountId: 'acc-1',
-      exchange: 'bybit',
-      marketType: 'SPOT',
-      symbol: 'btc/usdt',
-      side: 'BUY',
-      type: 'MARKET',
-      quantity: '0.01',
-      clientOrderId: 'client-order-123',
-      idempotencyKey: 'idem-key-1234567890abcdef'
-    });
-    expect(parsed.symbol).toBe('BTC/USDT');
-    expect(parsed.quantity).toBe('0.01');
-  });
-
-  it('rejects an order with both quantity and allocation', () => {
-    expect(() =>
-      parseOrderBody({
+  it('parses a valid order body with an explicit idempotency key', async () => {
+    const parsed = await parseOrderBody(
+      {
         exchangeAccountId: 'acc-1',
         exchange: 'bybit',
         marketType: 'SPOT',
@@ -40,11 +26,35 @@ describe('commands', () => {
         side: 'BUY',
         type: 'MARKET',
         quantity: '0.01',
-        allocation: { mode: 'PERCENT_EQUITY', percent: 2 },
         clientOrderId: 'client-order-123',
         idempotencyKey: 'idem-key-1234567890abcdef'
-      })
-    ).toThrow();
+      },
+      undefined,
+      testConfig
+    );
+    expect(parsed.symbol).toBe('BTC/USDT');
+    expect(parsed.quantity).toBe('0.01');
+  });
+
+  it('rejects an order with both quantity and allocation', async () => {
+    await expect(
+      parseOrderBody(
+        {
+          exchangeAccountId: 'acc-1',
+          exchange: 'bybit',
+          marketType: 'SPOT',
+          symbol: 'btc/usdt',
+          side: 'BUY',
+          type: 'MARKET',
+          quantity: '0.01',
+          allocation: { mode: 'PERCENT_EQUITY', percent: 2 },
+          clientOrderId: 'client-order-123',
+          idempotencyKey: 'idem-key-1234567890abcdef'
+        },
+        undefined,
+        testConfig
+      )
+    ).rejects.toThrow();
   });
 
   it('exposes structured command errors', () => {

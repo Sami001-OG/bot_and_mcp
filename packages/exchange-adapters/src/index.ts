@@ -59,12 +59,13 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
   async connect(credentials: ExchangeCredentials): Promise<ExchangeConnection> {
     const Constructor = ccxt[ccxtNames[this.id]] as unknown as new (config: Record<string, unknown>) => Exchange;
     const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
-    this.client = new Constructor({ apiKey: credentials.apiKey, secret: credentials.secret, password: credentials.passphrase, walletAddress: credentials.walletAddress, privateKey: credentials.privateKey, enableRateLimit: true, options: { defaultType: this.defaultType(), fetchOpenOrders: { warnWithoutSymbol: false } }, ...(proxy ? { httpsProxy: proxy } : {}) });
+    this.client = new Constructor({ apiKey: credentials.apiKey, secret: credentials.secret, password: credentials.passphrase, walletAddress: credentials.walletAddress, privateKey: credentials.privateKey, enableRateLimit: true, options: { defaultType: this.defaultType(), fetchOpenOrders: { warnWithoutSymbol: false }, ...(this.id === 'bybit' ? { recvWindow: 60000, adjustForTimeDifference: true } : {}) }, ...(proxy ? { httpsProxy: proxy } : {}) });
     try {
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           await this.client.loadMarkets();
+          if (this.id === 'bybit') await this.client.loadTimeDifference();
           const fetchedServerTime = this.client.has.fetchTime ? await this.client.fetchTime() : undefined;
           const serverTime = typeof fetchedServerTime === 'number' ? fetchedServerTime : Date.now();
           await this.client.fetchBalance();
@@ -284,7 +285,7 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
   private defaultType(): string { return resolveDefaultType(this.id, this.marketType); }
   private marketSymbol(symbol: string): string {
     const client = this.requireClient();
-    return resolveMarketSymbol(client.markets, symbol, this.defaultType());
+    return resolveMarketSymbol((client.markets ?? {}) as Record<string, CcxtMarketLike>, symbol, this.defaultType());
   }
   private bareSymbol(symbol: string): string { return bareSymbol(symbol); }
   private mapType(type: OrderRequest['type']): string { return ({ MARKET: 'market', LIMIT: 'limit', STOP: 'stop', STOP_MARKET: 'stop_market', STOP_LIMIT: 'stop_limit', TAKE_PROFIT: 'take_profit', TAKE_PROFIT_MARKET: 'take_profit_market', TRAILING_STOP: 'trailing_stop_market' } as const)[type]; }

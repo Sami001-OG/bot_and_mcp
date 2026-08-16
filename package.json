@@ -2,8 +2,13 @@
   "name": "crypto-trading-saas",
   "version": "1.0.0",
   "private": true,
-  "packageManager": "pnpm@11.18.0",
-  "engines": { "node": ">=22.0.0" },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "with-env": "node --env-file=.env",
     "build": "turbo run build",
@@ -12,12 +17,19 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test --concurrency=1",
     "test:coverage": "turbo run test:coverage --concurrency=1",
-    "db:generate": "pnpm --filter @platform/database generate",
-    "db:validate": "pnpm --filter @platform/database validate",
-    "verify:binance": "node --env-file=.env scripts/verify-binance.mjs",
+    "db:generate": "npm run generate -w @platform/database",
+    "db:validate": "npm run validate -w @platform/database",
     "verify:bybit": "node --env-file=.env scripts/verify-bybit.mjs",
-    "docs:check": "node scripts/check-docs.mjs",
-    "quality": "pnpm lint && pnpm typecheck && pnpm test && pnpm db:validate && pnpm docs:check && pnpm build"
+    "quality": "npm run lint && npm run typecheck && npm run test && npm run db:validate && npm run build"
+  },
+  "overrides": {
+    "fast-uri": "3.1.5",
+    "js-yaml@^5": "5.2.2",
+    "nanoid@^3": "3.3.17",
+    "postcss": "8.5.24",
+    "sharp": "0.35.0",
+    "undici": "7.29.0",
+    "ws@^8": "8.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
@@ -28,5 +40,14 @@
     "turbo": "^2.5.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"
+  },
+  "allowScripts": {
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "bufferutil@4.1.0": true,
+    "ccxt@4.5.73": true,
+    "esbuild@0.28.2": true,
+    "msgpackr-extract@3.0.4": true,
+    "prisma@6.19.3": true
   }
 }
