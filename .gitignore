@@ -16,7 +16,10 @@ packages/database/generated
 .DS_Store
 Thumbs.db
 .workbuddy-ai/
+.vercel/
 dump.rdb
 appendonlydir/
 # local database backups
 backups/
+.vercel
+.env*
