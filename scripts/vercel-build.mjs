@@ -17,6 +17,13 @@ function run(cmd, args, opts = {}) {
   }
 }
 
+const clientDir = path.join(root, 'apps', 'web', 'prisma', 'generated', 'client');
+const oldClientDir = path.join(root, 'packages', 'database', 'generated');
+
+console.log('[vercel-build] clearing generated clients (ensure Linux engine)');
+fs.rmSync(clientDir, { recursive: true, force: true });
+fs.rmSync(oldClientDir, { recursive: true, force: true });
+
 console.log('[vercel-build] generating prisma client');
 run(process.execPath, [prisma, 'generate', '--schema', path.join('packages', 'database', 'prisma', 'schema.prisma')]);
 

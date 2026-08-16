@@ -1,0 +1,9 @@
+.env*
+!.env.example
+apps/web/prisma/generated
+packages/database/generated
+node_modules
+.next
+out
+dist
+*.log
