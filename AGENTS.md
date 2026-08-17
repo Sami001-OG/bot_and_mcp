@@ -36,9 +36,10 @@
 - **Full E2E smoke green (exit 0)** on mainnet Bybit (empty futures account): login → create account (secret encrypted at rest, keyPreview masked, secret never echoed) → enable trading → create bot bound to account → **signed webhook 202, routed=1 failed=0** → run STOPPED with correct risk skip ("Order margin exceeds available equity, Order value below minimum of $10") → MCP initialize/tools-list (22 tools)/listAccounts/listBots all pass.
 - Old multi-tenant infra removed/retired: no Redis/BullMQ, no separate API/worker, no Postgres; tunnel/cloudflared artifacts and legacy infra files (`apps/api`, `apps/worker`, `infra/`, `docker-compose.yml`, `turbo.json`, `.github/workflows` pnpm CI, Redis dumps, dev logs) are cleanup leftovers.
 - Package unit tests green: security 4, commands 5 (others unchanged from prior sessions).
+- **Vercel production deploy fixed (commit `5436dbe`)**: `/api/health` 503 "Query Engine not located" resolved — `scripts/vercel-build.mjs` now copies the Prisma engine into `apps/web/.next/server/` AND registers it in `.next/required-server-files.json` `files` (the @vercel/next builder's `requiredServerFilesManifest` loop puts registered files in the initial pseudo layer of EVERY lambda → engine mounts at `/var/task/apps/web/.next/server/` = Prisma's layout-independent search location 2). Verified live: health 200, login/accounts/bots all serve from Atlas. Atlas IP access list must allow 0.0.0.0/0 for Vercel egress (TLS `InternalError` otherwise).
 
 ### Active
-- (none) — E2E verified against **MongoDB Atlas** (user provided the connection string). `prisma db push` applied (11 collections + indexes), full smoke green (exit 0): account created on Atlas with secret encrypted at rest (`v1:` prefix), bot bound (ObjectId verified), signed webhook 202 routed=1 failed=0, run STOPPED with risk skip. Local mongod 7.0.14 still runs on 27017 as fallback (unused now).
+- (none) — DB cleaned: all smoke-test artifacts dropped (`db.dropDatabase()` on Atlas `tradingbot`; 0 collections). App verified on empty DB (health 200, accounts/bots `[]`, settings auto-create on first use). NOTE: the smoke ExchangeAccount held a real Bybit API key (`LICs****iMMB`) — revoke it on Bybit if unused. Local mongod 7.0.14 still runs on 27017 as fallback (unused now).
 
 ### Blocked
 - None.
@@ -46,6 +47,7 @@
 ## Next Move
 1. Optional cleanup: `start-public.ps1`/`tunnel-proxy.mjs` already removed; consider a `scripts/` prune pass and README refresh. AGENTS.md refresh on env changes.
 2. When the Atlas cluster changes (new user/password/hosts), re-derive the direct URI from `nslookup -type=SRV _mongodb._tcp.cluster0.amjzy1x.mongodb.net` + TXT record, update `.env`, run `prisma db push`, re-run the smoke.
+3. On fresh `npm install`: re-apply the local next-build workarounds (nft home-glob patch + `eperm-skip.cjs`) — `vercel-build.mjs` (cloud build) needs NO patching and is self-contained.
 
 ## Relevant Files
 - `apps/web/app/api/exchange-accounts/route.ts` + `[id]/route.ts` — account CRUD (session-protected).
