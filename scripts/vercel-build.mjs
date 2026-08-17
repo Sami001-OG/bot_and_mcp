@@ -64,6 +64,17 @@ for (const nf of nftFiles) {
   } catch { }
 }
 console.log(`[vercel-build] nft.json files checked: ${nftFiles.length}`);
+for (const nf of nftFiles) console.log('[vercel-build] NFTFILE:', nf.split('.next')[1]);
+const perFile = new Map();
+for (const nf of nftFiles) {
+  try {
+    const j = JSON.parse(fs.readFileSync(nf, 'utf8'));
+    const eng = (j.files || []).filter((f) => f.includes('query_engine'));
+    if (eng.length) perFile.set(nf, eng);
+  } catch { }
+}
+console.log(`[vercel-build] nft.json files WITH engine: ${perFile.size}`);
+for (const [nf, eng] of perFile) console.log('[vercel-build] HAS-ENGINE:', nf.split('.next')[1], '->', eng[0]);
 if (engineHits.length === 0) {
   console.error('[vercel-build] FATAL: no prisma engine/generated-client entries in any nft.json trace');
   process.exit(1);
