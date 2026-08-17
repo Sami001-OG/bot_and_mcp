@@ -1,34 +1,84 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './styles.css';
 
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL
+  ?? process.env.VERCEL_PROJECT_PRODUCTION_URL
+  ?? process.env.VERCEL_URL
+  ?? 'http://localhost:3000';
+const metadataBase = new URL(siteUrl.startsWith('http') ? siteUrl : `https://${siteUrl}`);
+const title = 'NexusTrade | Bybit Trading Command Center';
+const description = 'Secure Bybit execution, TradingView automation, portfolio monitoring, and live risk controls in one trading command center.';
+
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
+  metadataBase,
   title: {
-    default: 'NexusTrade Trading Terminal',
-    template: '%s · NexusTrade',
+    default: title,
+    template: '%s | NexusTrade',
   },
-  description: 'Bybit execution, portfolio risk controls, and automated trading operations.',
+  description,
   applicationName: 'NexusTrade',
+  category: 'finance',
+  creator: 'NexusTrade',
+  publisher: 'NexusTrade',
+  referrer: 'origin-when-cross-origin',
+  alternates: { canonical: '/' },
+  manifest: '/manifest.webmanifest',
   icons: {
-    icon: [{ url: '/icon.svg', type: 'image/svg+xml' }],
+    icon: [
+      { url: '/favicon.ico', type: 'image/x-icon' },
+      { url: '/icon.svg', type: 'image/svg+xml' },
+      { url: '/favicon-16x16.png', sizes: '16x16', type: 'image/png' },
+      { url: '/favicon-32x32.png', sizes: '32x32', type: 'image/png' },
+    ],
     shortcut: '/favicon.ico',
-    apple: '/apple-icon.png',
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+    other: [{ rel: 'mask-icon', url: '/safari-pinned-tab.svg', color: '#7357ff' }],
+  },
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'black-translucent',
+    title: 'NexusTrade',
+  },
+  formatDetection: { telephone: false, email: false, address: false },
+  robots: {
+    index: false,
+    follow: false,
+    googleBot: { index: false, follow: false, noimageindex: true },
   },
   openGraph: {
     type: 'website',
     locale: 'en_US',
     url: '/',
     siteName: 'NexusTrade',
-    title: 'NexusTrade Trading Terminal',
-    description: 'Bybit execution, portfolio risk controls, and automated trading operations.',
-    images: [{ url: '/opengraph-image.png', width: 1200, height: 630, alt: 'NexusTrade Command Center' }],
+    title,
+    description,
+    images: [{
+      url: '/opengraph-image.png',
+      secureUrl: new URL('/opengraph-image.png', metadataBase),
+      width: 1200,
+      height: 630,
+      type: 'image/png',
+      alt: 'NexusTrade - Trading, under control.',
+    }],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'NexusTrade Trading Terminal',
-    description: 'Bybit execution, portfolio risk controls, and automated trading operations.',
-    images: ['/opengraph-image.png'],
+    title,
+    description,
+    images: [{ url: '/opengraph-image.png', alt: 'NexusTrade - Trading, under control.' }],
   },
+  other: {
+    'msapplication-TileColor': '#080a0e',
+    'msapplication-config': '/browserconfig.xml',
+  },
+};
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+  themeColor: '#080a0e',
+  colorScheme: 'dark',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
