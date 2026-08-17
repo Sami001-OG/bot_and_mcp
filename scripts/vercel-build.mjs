@@ -27,6 +27,15 @@ fs.rmSync(oldClientDir, { recursive: true, force: true });
 console.log('[vercel-build] generating prisma client');
 run(process.execPath, [prisma, 'generate', '--schema', path.join('packages', 'database', 'prisma', 'schema.prisma')]);
 
+const generatedFiles = fs.readdirSync(clientDir);
+console.log('[vercel-build] generated client dir:', generatedFiles.join(', '));
+const engineFile = generatedFiles.find((f) => /query_engine-.*\.node$/.test(f));
+if (!engineFile) {
+  console.error('[vercel-build] FATAL: no Prisma query engine binary in generated client dir');
+  process.exit(1);
+}
+console.log('[vercel-build] engine binary present:', engineFile);
+
 console.log('[vercel-build] compiling workspace packages');
 for (const pkg of packages) {
   console.log(`  -> @platform/${pkg}`);
