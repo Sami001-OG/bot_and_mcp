@@ -58,6 +58,8 @@
 - `packages/security/src/index.ts` — `encryptSecret`/`decryptSecret` (AES-256-GCM, ENCRYPTION_KEY hex or base64-32), `constantTimeEqual`, `hashToken`.
 - `packages/exchange-adapters/src/index.ts` — bybit `recvWindow: 30000` + `adjustForTimeDifference: true`.
 - `packages/database/prisma/schema.prisma` — ExchangeAccount, Bot(+exchangeAccountId), OrderIntent(+exchangeAccountId), BotVersion/BotRun/WebhookEndpoint/WebhookDelivery/Notification, Settings, Position, Execution.
+- **Vercel deploys run from the REPO ROOT** (`vercel deploy --prod` with root `.vercelignore`; never `--prebuilt` - the local prebuilt flow fails on missing filePathMap refs; never deploy from `apps/web` - rootDirectory double-appends the path).
+- **API lambdas pinned to `hkg1`** (`apps/web/vercel.json` `functions["app/api/**/route.ts"].regions`) - iad1 (US) gets 403 geo-blocked by Bybit CloudFront; hkg1 verified live (markets load). Bots create modal surfaces market-load errors with a Retry button instead of an infinite spinner.
 - `apps/web/lib/auth.ts` — SESSION_COOKIE `nx_session` (Secure in prod), `requireSession`, `checkPassword`.
 - Smoke script: `C:\Users\saifs\AppData\Local\Temp\opencode\smoke-web.mjs` (login→account→bot→signed webhook→MCP; reads creds from `.env` without echoing; expects a **fresh DB**).
 - Build preload: `C:\Users\saifs\AppData\Local\Temp\opencode\eperm-skip.cjs`; patched `node_modules/next/dist/compiled/@vercel/nft/index.js`.

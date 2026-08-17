@@ -1,5 +1,10 @@
 {
   "buildCommand": "node ../../scripts/vercel-build.mjs",
+  "functions": {
+    "app/api/**/route.ts": {
+      "regions": ["hkg1"]
+    }
+  },
   "crons": [
     {
       "path": "/api/cron",

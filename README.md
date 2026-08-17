@@ -1,808 +1,497 @@
-# Crypto Trading SaaS Platform
+# Crypto Trading Platform
 
-A TypeScript monorepo for building a multi-tenant cryptocurrency trading service with exchange adapters, spot and derivatives order models, risk controls, automated bots, TradingView webhook verification, a remote Model Context Protocol (MCP) endpoint, customer/admin interfaces, PostgreSQL, Redis/BullMQ, and container deployment assets. The live trading scope is **Bybit only** (spot + USDT linear futures).
+A single Next.js live-trading application (Vercel-deployable) that receives **TradingView alerts via signed webhooks**, executes them through **webhook bots**, and exposes a **Model Context Protocol (MCP) server** so AI agents can read portfolios and trade. Exchange connectivity is **Bybit only** (spot + USDT linear futures). All domain logic lives in workspace packages (`@platform/*`) that are bundled into the `.next` build; persistence is **MongoDB via Prisma**; credentials are stored per-account in MongoDB **encrypted at rest** — nothing is hardcoded in `.env`.
 
-> [!IMPORTANT]
-> This repository has been **end-to-end verified for live Bybit mainnet trading** (see [Current implementation status](#current-implementation-status)): a funded futures account ran a real round trip (market buy -> reduce-only close) through the full pipeline (API -> risk -> BullMQ worker -> Bybit -> executions -> position ledger -> realized PnL) with real fees and a correct -$0.004254 net result. Read the status section before supplying exchange credentials or enabling live trading, and keep per-account risk acknowledgment enabled.
+> [!WARNING]
+> This is live-trading software for a real exchange. A bot bound to a real Bybit API key will spend real money when it receives a webhook signal. Read [Safety](#safety) before enabling trading.
 
 ## Contents
 
-- [What is in the repository](#what-is-in-the-repository)
-- [System architecture](#system-architecture)
-- [How a trade is intended to flow](#how-a-trade-is-intended-to-flow)
-- [Repository map](#repository-map)
-- [Applications](#applications)
-- [Shared packages](#shared-packages)
-- [Database model](#database-model)
-- [Exchange integration](#exchange-integration)
-- [Trading and futures behavior](#trading-and-futures-behavior)
-- [Risk controls](#risk-controls)
-- [TradingView webhooks](#tradingview-webhooks)
-- [Bots](#bots)
-- [MCP server](#mcp-server)
-- [REST, GraphQL, and WebSockets](#rest-graphql-and-websockets)
+- [Live app](#live-app)
+- [How a trade flows (execution model)](#how-a-trade-flows-execution-model)
+- [1. Log in](#1-log-in)
+- [2. Exchange APIs (required first step)](#2-exchange-apis-required-first-step)
+- [3. Bots](#3-bots)
+- [4. TradingView webhooks](#4-tradingview-webhooks)
+- [5. Orders page (manual control)](#5-orders-page-manual-control)
+- [6. Dashboard](#6-dashboard)
+- [7. Settings and risk controls](#7-settings-and-risk-controls)
+- [8. MCP server (AI agent access)](#8-mcp-server-ai-agent-access)
+- [9. Cron maintenance endpoint](#9-cron-maintenance-endpoint)
+- [REST API reference](#rest-api-reference)
 - [Security model](#security-model)
-- [Configuration](#configuration)
+- [Environment variables](#environment-variables)
+- [Repository map](#repository-map)
+- [Architecture and data model](#architecture-and-data-model)
 - [Local development](#local-development)
-- [Commands and quality gates](#commands-and-quality-gates)
-- [Deployment](#deployment)
-- [Observability and operations](#observability-and-operations)
-- [Current implementation status](#current-implementation-status)
-- [Documentation index](#documentation-index)
+- [Building, testing, linting](#building-testing-linting)
+- [Deployment (Vercel)](#deployment-vercel)
+- [Troubleshooting](#troubleshooting)
+- [Safety](#safety)
 
-## What is in the repository
+## Live app
 
-The platform is organized as five deployable applications and nine shared packages:
+The production deployment is served from Vercel:
 
-| Area | Path | Purpose |
+- URL: `https://web-blue-delta-17.vercel.app` (region `hkg1`, near Bybit's API edge — iad1 gets geo-blocked by Bybit, see [Troubleshooting](#troubleshooting))
+- MCP endpoint: `https://web-blue-delta-17.vercel.app/api/mcp`
+
+Everything below applies equally to `localhost:3000` and the deployed URL.
+
+## How a trade flows (execution model)
+
+There are exactly three ways to get an order to the exchange:
+
+1. **TradingView webhook → bot** (the intended main path). A signed alert hits `/api/webhooks/tradingview/:endpointId`. The signature is verified, the payload is checked against the signal schema, and the signal is routed to every **ACTIVE** webhook bot subscribed to that endpoint — or, if the endpoint has no subscribed bots (e.g. an endpoint you created manually on the Webhooks page), to **all** ACTIVE webhook bots. Each bot then applies its own filters (symbol match incl. `*` wildcard, allowed-actions list, exchange) and skips non-matching signals. For matching signals the bot computes order size from its allocation mode, applies its SL/TP bracket, runs each order through the risk engine, persists it as an `OrderIntent`, and executes it synchronously against Bybit. Delivery is `DELIVERED` only if every matched bot run succeeded; otherwise `FAILED` with `routed`/`failed` counts.
+2. **MCP trade tools** (`placeOrder`, `cancelOrder`, `closePosition`, `closeAll`, `changeLeverage`) — executed synchronously through the same commands/risk-engine/execute pipeline. You can call these from any MCP client (Claude, Cursor, custom scripts).
+3. **Orders page** (manual order form + cancel + emergency close-all) — same synchronous pipeline.
+
+All paths: parse → risk-check (`evaluateOrder`: trading enablement, daily-loss breaker, margin vs. equity, min-notional, leverage, position size) → size to exchange precision → persist `OrderIntent` → submit to Bybit → record `Execution` fills → update `Position` ledger. Bots also record a `BotRun` (STOPPED/ERROR with metrics: price, orders, skipped, notes, positionSide).
+
+> [!NOTE]
+> Execution is synchronous — an HTTP request (webhook, MCP call, API call) does not return until Bybit has answered. Timeouts on the exchange side surface as errors; use `cancelOrder` / the Orders page to clean up.
+
+## 1. Log in
+
+Open the app root (`/`). There is no user registration — the app is single-user, protected by one password:
+
+- Enter the password (`APP_PASSWORD` env var) and submit.
+- On success the app sets the session cookie (`nx_session`, Secure in production) and lands you on `/dashboard`.
+- Log out via the account button in the sidebar.
+
+If you're scripting against the REST API from outside a browser, `POST /api/auth/login` with `{ "password": "..." }` returns the session cookie in `Set-Cookie`; send it back as the `Cookie` header on subsequent requests.
+
+## 2. Exchange APIs (required first step)
+
+Every bot is created **with** an exchange API — there is no global/default key. Nothing is hardcoded; you enter your Bybit key/secret in the UI and it is encrypted before storage.
+
+Go to **Exchange APIs** (`/accounts`):
+
+1. **Create an account** — fields:
+   - **Label** — a friendly name, e.g. "futures-main".
+   - **Exchange** — currently `bybit`.
+   - **Market type** — `USDT_FUTURES` (linear perpetuals) or `SPOT`.
+   - **API key** and **API secret** — from Bybit (My Account → API Management). Create a read-write key; restrict withdrawal rights. The secret is encrypted with AES-256-GCM before it reaches MongoDB.
+2. The first account automatically becomes **primary** (the default account for manual orders, dashboard reads, and MCP read tools). The list shows `keyPreview` (e.g. `LICs****iMMB`) so you can identify accounts without ever seeing the full key, and `botCount` — the number of bots bound to it.
+3. **Set primary** — switches the default account for anything not bound to a specific account.
+4. **Delete** — returns 409 `ACCOUNT_IN_USE` if bots still reference the account; stop/delete those bots first.
+
+Trading API requirements on the Bybit side: enable the API key, and for futures ensure the account is in the appropriate position mode (one-way or hedge — the adapter handles both; `LONG`/`SHORT` map to hedge-mode positionIdx 1/2).
+
+## 3. Bots
+
+Bots are the automation unit: they subscribe a set of symbols to a webhook endpoint and translate incoming signals into sized, risk-checked orders with optional SL/TP brackets.
+
+Go to **Bots** (`/bots`):
+
+- **Create bot** (New bot) — fields:
+  - **Name** — any label, e.g. `btc-breakout`.
+  - **Exchange API** — the account the bot trades with (required, select from your saved accounts).
+  - **Symbols** — one or more, e.g. `BTC/USDT:USDT`, `ETH/USDT:USDT` (futures format `<BASE>/<QUOTE>:<QUOTE>`). Symbols load live from Bybit's market list; if loading fails you'll see an error with a Retry button instead of an infinite spinner.
+  - **Allocation mode** — how order size is derived:
+    - `Use signal size` (NONE) — the bot uses `size` from the TradingView alert directly.
+    - `PERCENT_EQUITY` — `percent`% of current equity.
+    - `PERCENT_MAX_EQUITY` — `percent`% of peak equity.
+    - `FIXED_AMOUNT` — a fixed USD amount (`amount`, decimal string).
+    - `RISK_PERCENT` — `percent`% of equity at risk (stop-distance aware).
+  - **Leverage** — 1–200 (futures).
+  - **Stop loss price** — optional fixed SL price; orders will attach a reduce-only SL bracket.
+  - **Take profits** — optional comma-separated prices, e.g. `100000, 110000`; each becomes a reduce-only TP bracket order.
+  - **Require stop loss before entering** — when checked, signals without a `stop_loss` are skipped.
+  - **Allowed signal actions** — checkbox allowlist: `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`. Signals with other actions are ignored.
+
+- **Statuses**: bots start **ACTIVE** and respond to webhook signals. Pause / Resume / Stop per bot from the list or detail view; paused/stopped bots ignore signals (their endpoint is deactivated with them).
+- **Dedicated endpoint**: creating a bot (UI or MCP) also creates a dedicated webhook endpoint named `<bot> (bot webhook)` — its URL and signing secret are shown once in the create dialog. A signal addressed to a bot's own endpoint only ever triggers that bot; a signal to a manually-created endpoint triggers every ACTIVE bot (each of which filters by symbol/action).
+- **Bot detail** shows the bound account, config version history, and **runs** — each webhook trigger produces a run row with metrics: signal action, symbol, mark price, number of orders placed, skipped (with reasons, e.g. "Order margin exceeds available equity", "Order value below minimum of $10", "Symbol X not in configured bot symbols"), and errors.
+
+## 4. TradingView webhooks
+
+### Create an endpoint
+
+Go to **Webhooks** (`/webhooks`), enter a name, and create. You get:
+
+- **URL** — `https://<your-host>/api/webhooks/tradingview/<endpointId>`
+- **Signing secret** — shown **exactly once**; copy it immediately. It is stored encrypted and can never be retrieved again (if you lose it, delete and recreate the endpoint).
+
+### Signal payload format
+
+The TradingView alert message body must be JSON with these fields:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `exchange` | string | yes | `"bybit"` |
+| `symbol` | string | yes | e.g. `"BTC/USDT:USDT"` (uppercased) |
+| `action` | string | yes | one of `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`, `SET_LEVERAGE`, `MOVE_STOP` |
+| `size` | string | yes | **decimal string**, e.g. `"0.01"` — a JSON number `0.01` is rejected |
+| `timestamp` | string | yes | **ISO-8601 string**, e.g. `"2026-08-17T10:00:00.000Z"`; must be within ±5 minutes of server time |
+| `nonce` | string | yes | ≥ 12 chars; replaying the same `nonce` within 5 minutes is rejected |
+| `leverage` | number | no | 1–200 |
+| `stop_loss` | string | no | decimal string price |
+| `take_profit` | array of strings | no | decimal string prices, max 20 |
+| `reduce_only` | boolean | no | default false |
+| `close_percentage` | number | no | 0–100 |
+
+Actions `SET_LEVERAGE` and `MOVE_STOP` are schema-valid but not exposed as bot action options — bots ignore them unless configured.
+
+**Minimal example** (`{{...}}` is TradingView alert message content):
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "{{ticker}}",
+  "action": "BUY",
+  "size": "0.01",
+  "timestamp": "{{timestamp_iso}}",
+  "nonce": "{{timenow}}-{{ticker}}"
+}
+```
+
+> [!NOTE]
+> `timestamp` must be an ISO-8601 string, not epoch seconds — TradingView's built-in `{{timenow}}` placeholder is epoch (and only 10 chars, too short for `nonce` on its own). From a Pine script, emit the timestamp as `str.format_time(time, "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", "UTC")` into a plot/alert variable, or use any other ISO-producing placeholder. For manual tests, put a literal ISO timestamp of the current time (keep it within 5 minutes of sending).
+
+Common alert scripts produce something like:
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "{{ticker}}",
+  "action": "LONG",
+  "size": "0.01",
+  "leverage": 10,
+  "stop_loss": "89000",
+  "take_profit": ["100000", "110000"],
+  "timestamp": "{{timestamp_iso}}",
+  "nonce": "{{timenow}}-{{ticker}}"
+}
+```
+
+### Signing (required)
+
+Every request must carry the header:
+
+```
+x-tradingview-signature: <hex>
+```
+
+where `<hex>` is the **HMAC-SHA256 of the exact raw request body bytes**, keyed with the endpoint's signing secret, hex-encoded lowercase. The body must be sent byte-identical to what you sign (same whitespace, same key order) — TradingView sends the message content verbatim, so sign the exact JSON string.
+
+Generating it in Node.js:
+
+```js
+import { createHmac } from 'node:crypto';
+const body = JSON.stringify({ /* your signal */ });
+const signature = createHmac('sha256', 'THE_SIGNING_SECRET').update(body).digest('hex');
+console.log(body, signature);
+```
+
+or with a quick smoke test against a local/remote instance:
+
+```powershell
+$body = '{"exchange":"bybit","symbol":"BTC/USDT:USDT","action":"BUY","size":"0.01","timestamp":"2026-08-17T10:00:00.000Z","nonce":"n-1750000000-btc"}'
+$sig = [System.Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes('THE_SIGNING_SECRET')).ComputeHash([Text.Encoding]::UTF8.GetBytes($body))
+$sigHex = ($sig | ForEach-Object { $_.ToString('x2') }) -join ''
+Invoke-WebRequest -Method POST -Uri 'https://<host>/api/webhooks/tradingview/<endpointId>' -Headers @{ 'x-tradingview-signature' = $sigHex } -ContentType 'application/json' -Body $body
+```
+
+If `WEBHOOK_REQUIRE_SIGNATURE=false`, unsigned requests are accepted (do not do this in production).
+
+### Setting up the alert in TradingView
+
+1. Open your strategy/chart → **Alerts** → create an alert for the symbol.
+2. Set **Condition** / **Action** per your strategy.
+3. Under **Notifications**, choose **Webhook URL** and paste the endpoint URL.
+4. In **Message**, paste the JSON signal (with `{{...}}` placeholders so `symbol`, `timestamp`, and `nonce` are dynamic).
+5. Under **Options**, ensure **"Webhook data is JSON"** is selected, then save.
+
+### Responses
+
+| Status | Meaning |
+|---|---|
+| `202` | Accepted. Body: `{ deliveryId, routed, failed, bots: [...] }`. `routed` = bots that processed it, `failed` = bot runs that errored, `deliveryId` = the persisted `WebhookDelivery` (view deliveries on the Webhooks page). A `note` field may explain degenerate cases: `LIVE_TRADING_DISABLED` (trading toggle off — `failed: 1`) or `no ACTIVE bot for this endpoint`. |
+| `401` | Missing/invalid signature, stale timestamp, or replayed nonce (`WEBHOOK_VERIFICATION_FAILED`). |
+| `404` / `410` | Unknown endpoint / endpoint deactivated (endpoints are deactivated when their bot is paused/stopped). |
+| `4xx/5xx` | Schema or processing errors. |
+
+Verification order: signature (HMAC over raw body) → schema parse → timestamp tolerance (±5 min) → nonce replay claim (`<exchange>:<nonce>`, persisted on the endpoint row for 5 minutes).
+
+## 5. Orders page (manual control)
+
+**Orders** (`/orders`) is the manual override surface:
+
+- **Manual order form** — place a market/limit order directly: select the exchange API, symbol, side, order type, price, quantity. Goes through the same risk engine and persists as an `OrderIntent`.
+- **Open orders** — list of in-flight orders on the exchange plus recent persisted order intents, with cancel buttons (`POST /api/orders/:id/cancel`).
+- **Emergency close-all** — "Close all positions" issues reduce-only market orders for every open position on the account (also `POST /api/orders/emergency/close-all`). Not gated by risk controls by design, so it works in a crisis.
+
+## 6. Dashboard
+
+**Dashboard** (`/dashboard`) shows the live state of the primary account:
+
+- Portfolio summary: total equity, 24h realized PnL, open position count.
+- Positions with entry, mark price, unrealized PnL, liquidation estimate, leverage.
+- Recent executions and orders.
+- Risk panel: trading toggle, daily-loss limit, circuit-breaker state.
+- Live-trading indicator + notifications bell (unread count, mark-read).
+
+Read endpoints used by the dashboard: `/api/portfolio/summary`, `/api/portfolio/pnl`, `/api/portfolio/positions`, `/api/portfolio/executions`, `/api/orders`, `/api/settings`.
+
+## 7. Settings and risk controls
+
+`/api/settings` (GET/PATCH, session-protected) is the risk-control surface; the dashboard renders it:
+
+- **`tradingEnabled`** (boolean) — global kill switch. When false: order placement (manual/MCP) and bot creation are rejected with 409 `LIVE_TRADING_DISABLED`, and webhook signals are accepted but not executed (202 with `note: LIVE_TRADING_DISABLED`, delivery marked FAILED). Acknowledging live trading sets `liveTradingAcknowledgedAt`.
+- **`dailyLossLimit`** (decimal string or `null`) — when today's realized PnL is below the negative limit, the daily-loss **circuit breaker** trips (`breakerTripped`, `breakerReason`, `breakerDailyPnl`): bot runs are marked STOPPED with a CRITICAL notification, and manual/MCP orders are rejected with 409 `DAILY_LOSS_LIMIT_BREACHED`. Cleared by setting the limit to `null`. The breaker is re-evaluated by the [cron job](#9-cron-maintenance-endpoint) and before every order.
+- **`equity` / `peakEquity`** — tracked for `PERCENT_MAX_EQUITY` allocation and drawdown checks.
+
+## 8. MCP server (AI agent access)
+
+The app exposes a full MCP server over Streamable HTTP — point any MCP client at the URL and the app's own tools/commands do the trading.
+
+- **URL**: `<origin>/api/mcp` (also visible in the app via `/api/settings` → `mcpUrl`)
+- **Auth**: `Authorization: Bearer <MCP_PASSWORD>` (falls back to `APP_PASSWORD` if `MCP_PASSWORD` is unset; `x-mcp-password` header also accepted). No auth → `401`.
+- **Protocol**: JSON-RPC 2.0 over streamable HTTP. Supports `initialize`, `tools/list`, `tools/call`, `ping`.
+
+### Tools (22)
+
+Read tools:
+
+| Tool | What it does |
+|---|---|
+| `listAccounts` | Configured exchange accounts (IDs needed for `createBot`) |
+| `getPortfolio` | Live balances + positions for the configured account |
+| `getBalance` | Current balances |
+| `getPositions` | Open futures positions |
+| `getOrders` | Open exchange orders + recent persisted order intents |
+| `getMarketData` | Current price + tradability for a symbol |
+| `getMarkets` | Tradeable markets, optionally filtered by quote |
+| `getOHLCV` | Candlestick history |
+| `getFundingRate` | Current funding for a perpetual |
+| `getOpenInterest` | Open interest for a perpetual |
+| `getRiskMetrics` | Risk policy, exposure, position count, 24h realized PnL |
+| `getPerformance` | Realized PnL by symbol + ledger positions |
+| `getTradeHistory` | Recent orders/executions incl. fees |
+
+Write tools (all through the risk engine, synchronous):
+
+| Tool | What it does |
+|---|---|
+| `placeOrder` | Place a live order (`exchangeAccountId`, `symbol`, `side`, `type`, `quantity`, `price?`, `stopPrice?`, `leverage?`, `reduceOnly?`, `clientOrderId?`, `idempotencyKey?`) |
+| `cancelOrder` | Cancel an open order |
+| `closePosition` | Reduce-only market close for a symbol |
+| `closeAll` | Close every open position on the account |
+| `changeLeverage` | Set leverage for a futures instrument |
+| `createBot` | Create a webhook bot (requires `exchangeAccountId`; creates a dedicated endpoint) |
+| `resumeBot` / `pauseBot` | Activate / pause a bot |
+| `deleteBot` | Soft-delete (stop) a bot |
+
+### Quick start
+
+```bash
+# list tools
+curl -s -X POST https://<host>/api/mcp \
+  -H 'Authorization: Bearer <MCP_PASSWORD>' \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"1.0"}}}'
+```
+
+Then `tools/list` (returns all 22 specs), then `tools/call`:
+
+```json
+{ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+  "params": { "name": "getPortfolio", "arguments": {} } }
+```
+
+Results are returned as text content: `{ "ok": true, "tool": "...", "correlationId": "...", ...result }`.
+
+To connect Claude Desktop or any MCP client, use the **streamable HTTP** transport with a custom `Authorization: Bearer` header; Claude Code supports streamable HTTP servers directly (see [MCP docs](https://opencode.ai) for your client). The same `MCP_PASSWORD` protects the UI-less API too — keep it random and long.
+
+> [!NOTE]
+> `placeOrder` and friends execute **immediately** and cannot be revoked mid-flight; treat the MCP write tools like the manual order form. `cancelOrder` and `closeAll` are your emergency handles from an agent.
+
+## 9. Cron maintenance endpoint
+
+`POST /api/cron` runs housekeeping that would otherwise be the BullMQ-era scheduled jobs:
+
+- Auth: `x-cron-secret: <CRON_SECRET>` header (or `Authorization: Bearer <CRON_SECRET>`). Returns 503 if `CRON_SECRET` is unset, 401 on mismatch.
+- Runs three jobs in parallel: `checkCircuitBreaker` (re-evaluates the daily-loss breaker), `scanForStaleOrders` (reconciles orders stuck in flight), `syncPositionsNow` (re-fetch positions + mark prices from Bybit).
+- Response: `{ ranAt, breaker, stale, positions }`.
+
+On Vercel, add a cron job (e.g. every 5 minutes) hitting this endpoint with the secret header. Locally, `curl -X POST http://localhost:3000/api/cron -H "x-cron-secret: $env:CRON_SECRET"`.
+
+## REST API reference
+
+All routes are session-protected except the public ones noted. Responses are JSON; errors use `{ message, code, statusCode }` (RFC 9457-style `ApiProblem`).
+
+| Method | Route | Purpose |
 |---|---|---|
-| Control-plane API | `apps/api` | NestJS REST endpoints, generated Swagger UI, and Socket.IO realtime namespace |
-| Asynchronous workers | `apps/worker` | BullMQ workers for orders, webhooks, bots, reconciliation, and notifications |
-| Remote agent interface | `apps/mcp-server` | HTTP MCP server with read and mutation tools |
-| Customer interface | `apps/web` | Next.js customer portfolio/trading dashboard |
-| Operations interface | `apps/admin` | Next.js admin/security/operations dashboard |
-| Runtime contracts | `packages/contracts` | Zod schemas, shared enums, decimal-string rules, and API envelope types |
-| Exchange abstraction | `packages/exchange-core` | Canonical exchange types, capabilities, errors, and adapter interface |
-| Exchange implementations | `packages/exchange-adapters` | CCXT-backed adapters and exchange capability matrix |
-| Trading domain | `packages/trading-core` | Order state machine, position accounting, PnL, and bracket-order generation |
-| Risk domain | `packages/risk-engine` | Pre-trade limits, drawdown calculations, liquidation estimates, and circuit breaker |
-| Security | `packages/security` | AES-256-GCM envelope encryption, hashing, constant-time comparison, and redaction |
-| Webhook verification | `packages/webhook` | TradingView HMAC, timestamp, schema, and replay verification |
-| Bot runtime | `packages/bot-engine` | Bot lifecycle and strategy execution contracts |
-| Persistence | `packages/database` | Prisma PostgreSQL schema and generated client |
+| `POST` | `/api/auth/login` | Password login → session cookie |
+| `POST` | `/api/auth/logout` | Destroy session |
+| `GET` | `/api/auth/me` | Current session info |
+| `GET` | `/api/health` | Health (DB, engine location) |
+| `GET` / `PATCH` | `/api/settings` | Risk settings (trading toggle, daily loss limit) |
+| `GET` / `POST` | `/api/exchange-accounts` | List / create accounts (create body: `label`, `exchange`, `marketType`, `apiKey`, `apiSecret`) |
+| `PATCH` / `DELETE` | `/api/exchange-accounts/[id]` | Set primary / delete (409 `ACCOUNT_IN_USE` when bots bound) |
+| `GET` / `POST` | `/api/bots` | List / create bots |
+| `PATCH` / `DELETE` | `/api/bots/[id]` | Update config / delete |
+| `POST` | `/api/bots/[id]/[action]` | `resume` \| `pause` \| `stop` |
+| `GET` / `POST` | `/api/orders` | List / place manual order |
+| `POST` | `/api/orders/[id]/cancel` | Cancel an order |
+| `POST` | `/api/orders/emergency/close-all` | Close all positions (ungated) |
+| `GET` | `/api/orders/[id]` | Order intent detail |
+| `GET` | `/api/markets?quote=USDT` | Live Bybit markets (drives the bots symbol picker) |
+| `GET` | `/api/portfolio/summary` | Equity, PnL, positions count |
+| `GET` | `/api/portfolio/pnl` | Realized PnL |
+| `GET` | `/api/portfolio/positions` | Open positions |
+| `GET` | `/api/portfolio/executions` | Recent fills |
+| `GET` / `POST` | `/api/webhooks` | List / create endpoints (create returns `signingSecret` once) |
+| `POST` | `/api/webhooks/tradingview/[endpointId]` | **Public** — signed TradingView ingress |
+| `POST` | `/api/cron` | Maintenance (CRON_SECRET) |
+| `GET` / `POST` | `/api/mcp` | **Public** — MCP server (Bearer password) |
+| `GET` / `POST` / `DELETE` | `/api/notifications...` | Notifications list / read / unread count |
 
-The monorepo uses pnpm workspaces and Turborepo. Node.js 22 is the supported runtime and the package manager is pinned through the root `packageManager` field.
+## Security model
 
-## System architecture
+- **Single-password auth**: `APP_PASSWORD` (comparison is constant-time). Session cookie `nx_session` is HttpOnly + Secure in production.
+- **MCP**: Bearer `MCP_PASSWORD`, constant-time compared. No tokens stored.
+- **Credentials at rest**: the Bybit API **secret** is encrypted with AES-256-GCM (`ENCRYPTION_KEY`, 64-hex or 32-byte base64) into `v1:<iv>:<tag>:<ct>` envelopes; the API key is stored plaintext (it's a public identifier) and shown only as `keyPreview`. Secrets are decrypted only in memory, immediately before an exchange call, and never returned by any API.
+- **Webhooks**: HMAC-SHA256 of the raw body + ±5-minute timestamp tolerance + nonce replay protection. Signing secret shown once.
+- **No secrets in the repo**: `.env` is gitignored (`.env.example` documents keys); never commit exchange keys, signing secrets, or passwords.
+- The dashboard is the only UI; there is no registration, no multi-tenant separation — protect the password.
 
-The target architecture separates work into three logical planes.
+## Environment variables
 
-### Control plane
+Root `.env` (gitignored) — the app has **no** `apps/web/.env`; Next.js is started with the root `.env` loaded into the process environment (see [Local development](#local-development)).
 
-The control plane accepts users, organization/workspace context, configuration, read requests, and commands. In the target production flow it validates authentication, tenancy, payloads, idempotency, and risk, then commits commands to PostgreSQL with an outbox event. It does **not** wait for an exchange during an HTTP request.
+| Variable | Required | Meaning |
+|---|---|---|
+| `DATABASE_URL` | yes | MongoDB connection string (Atlas direct multi-host or `mongodb://127.0.0.1:27017/tradingbot` locally) |
+| `APP_PASSWORD` | yes | UI login password |
+| `MCP_PASSWORD` | yes (prod) | MCP bearer token (falls back to `APP_PASSWORD`) |
+| `SESSION_SECRET` | yes | Signs the session cookie |
+| `ENCRYPTION_KEY` | yes | 64-hex or 32-byte base64; AES-256-GCM for exchange secrets |
+| `CRON_SECRET` | for cron | Authenticates `/api/cron` |
+| `WEBHOOK_REQUIRE_SIGNATURE` | no | `true` (default) — set `false` only to allow unsigned webhooks |
+| `BYBIT_API_KEY` / `BYBIT_SECRET_KEY` | no | **Legacy fallback only** — the app no longer reads them; enter credentials in the UI |
 
-Current control-plane entry points:
-
-- `apps/api/src/main.ts` boots NestJS, Helmet, CORS, validation, correlation IDs, the `/api/v1` prefix, and Swagger at `/docs`.
-- `apps/api/src/modules.ts` provides initial health, portfolio, order, bot, webhook, and realtime transports.
-- `apps/mcp-server/src/main.ts` exposes an MCP-over-HTTP endpoint for authorized agents.
-
-### Execution plane
-
-The execution plane is responsible for durable work that may be retried, reconciled, rate-limited, or isolated by exchange.
-
-- Redis carries BullMQ jobs.
-- `apps/worker/src/main.ts` starts workers for `orders`, `webhooks`, `bots`, `reconciliation`, and `notifications`.
-- Exchange workers are intended to decrypt credentials only immediately before an exchange request.
-- An ambiguous exchange timeout must enter `RECONCILING`; it must not be blindly submitted again.
-
-The worker starts fully-wired processors for `orders`, `webhooks`, `bots`, `reconciliation`, and `notifications`: it decrypts credentials immediately before an exchange request, applies risk gates and exchange precision at execution time, records executions/fees and the fill-driven position ledger, and reconciles stale/replayed states. An ambiguous exchange timeout advances the order to `RECONCILING` instead of blind resubmission. This pipeline is live-verified against Bybit mainnet.
-
-### Data and market-data plane
-
-PostgreSQL is the authoritative store for identities, workspaces, credentials, policies, orders, executions, positions, bots, webhook deliveries, MCP grants, audit records, outbox records, and idempotency records. Redis is intended for queues, replay claims, coordination, caches, and realtime fan-out.
-
-Canonical market collectors, sequence-gap restoration, persistent OHLCV, order books, funding, open interest, mark/index price, and liquidation streams are architectural targets documented in `docs/architecture.md`; they are not yet running services in this repository.
-
-## How a trade is intended to flow
-
-The production design uses this lifecycle:
-
-1. A REST client, webhook, bot, or MCP client creates an order command.
-2. Shared Zod contracts normalize the exchange, market, symbol, side, position side, quantity, prices, time-in-force, leverage, margin mode, client order ID, and idempotency key.
-3. Authentication and workspace authorization establish who may act on which exchange account.
-4. The risk engine evaluates trading enablement, loss limits, drawdown, exposure, leverage, size, open-position count, and cooldown state.
-5. PostgreSQL commits the `OrderIntent`, idempotency response, audit event, and outbox event atomically.
-6. An outbox publisher adds an `orders` job to BullMQ.
-7. A worker rechecks workspace/account/bot/global kill switches and risk immediately before execution.
-8. The worker decrypts the active credential envelope, creates the correct exchange adapter, checks capability support, applies exchange precision/rate rules, and submits.
-9. A clear exchange response advances the order state. A timeout or uncertain response advances it to `RECONCILING`.
-10. Reconciliation queries orders, client order IDs, fills, and positions before deciding whether a retry is safe.
-11. Executions update position quantity, weighted average entry, realized PnL, and audit/realtime events.
-12. WebSocket and read-model consumers receive ordered events with sequence numbers and correlation IDs.
-
-Steps 1-11 are implemented and live-verified: the API validates and risk-checks synchronously (persisting the `OrderIntent`), enqueues to BullMQ, and the worker executes against the exchange with reconciliation; executions update position quantity, weighted average entry, realized PnL, and audit/realtime events. Step 12 (ordered realtime event read-models) remains incremental work.
+Generate a key: `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`.
 
 ## Repository map
 
 ```text
 .
-├── apps/
-│   ├── api/                 NestJS API and Socket.IO gateway
-│   ├── worker/              BullMQ worker host
-│   ├── mcp-server/          Streamable HTTP MCP endpoint
-│   ├── web/                 Customer Next.js dashboard
-│   └── admin/               Operations Next.js dashboard
+├── apps/web/                  # The entire app (Next.js 15, App Router, dark dashboard)
+│   ├── app/api/               # All API routes (auth, accounts, bots, orders, portfolio,
+│   │                          #   webhooks, settings, markets, notifications, cron, mcp, health)
+│   ├── app/(pages)/           # dashboard, orders, bots, webhooks, accounts, login
+│   ├── lib/                   # auth (session), route helpers, session fetch
+│   └── vercel.json            # Lambda regions (hkg1)
 ├── packages/
-│   ├── contracts/           Shared validation and transport types
-│   ├── exchange-core/       Exchange abstraction
-│   ├── exchange-adapters/   CCXT adapter implementation
-│   ├── trading-core/        Order and position domain logic
-│   ├── risk-engine/         Risk limits and circuit breaker
-│   ├── security/            Encryption and secret-safe helpers
-│   ├── webhook/             TradingView verification
-│   ├── bot-engine/          Bot lifecycle and strategy contracts
-│   └── database/            Prisma schema and generated client
-├── docs/                    Architecture and protocol specifications
-├── infra/
-│   ├── docker/Dockerfile    Multi-stage service image
-│   ├── render/render.yaml   Staging service blueprint
-│   └── kubernetes/          Initial production Kubernetes base
-├── scripts/check-docs.mjs   Required-document validator
-├── docker-compose.yml       Local PostgreSQL, Redis, and Mailpit
-├── eslint.config.mjs        Flat ESLint configuration
-├── tsconfig.base.json       Strict shared TypeScript configuration
-├── turbo.json               Monorepo task graph
-├── pnpm-workspace.yaml      Workspace and dependency build allowlist
-└── .github/workflows/ci.yml CI, scanning, and image publication
+│   ├── database/              # Prisma schema + generated client (MongoDB)
+│   ├── security/              # encryptSecret/decryptSecret (AES-256-GCM), constantTimeEqual, hashToken
+│   ├── contracts/             # Zod schemas (orders, TradingView signals, webhook bot config)
+│   ├── exchange-core/         # Canonical exchange types/errors/adapter interface
+│   ├── exchange-adapters/     # ccxt Bybit adapter (recvWindow 30000, time-sync enabled)
+│   ├── trading-core/          # Order sizing, precision alignment, PnL/position math
+│   ├── risk-engine/           # evaluateOrder (risk checks), min-notional, sizing
+│   ├── bot-engine/            # Webhook strategy: buildWebhookOrders (entry + SL/TP brackets)
+│   ├── webhook/               # TradingViewVerifier (HMAC, timestamp, replay)
+│   └── commands/              # ALL domain logic: accounts, bots, orders, execute, portfolio, settings
+└── scripts/vercel-build.mjs   # Vercel build hook (copies Prisma engine into .next)
 ```
 
-Build output (`dist`, `.next`), installed dependencies (`node_modules`), the generated Prisma client, and `.workbuddy-ai` project continuity data are not authored source code.
+All packages are bundled into the `.next` build — after editing a package you must rebuild its dist (`node_modules/.bin/tsc -p packages/<pkg>/tsconfig.json`) **and** rerun `next build`.
 
-## Applications
+## Architecture and data model
 
-### `apps/api`
-
-`apps/api/src/main.ts` performs the HTTP bootstrap:
-
-- enables NestJS raw-body support for future signed-webhook verification;
-- prefixes application routes with `/api/v1`;
-- applies Helmet security headers;
-- enables credentialed CORS for configured origins;
-- adds or propagates `x-correlation-id`;
-- installs a global validation pipe;
-- publishes generated Swagger UI at `/docs`;
-- listens on `PORT`, defaulting to `4000`.
-
-`apps/api/src/modules.ts` currently exposes:
-
-| Method | Route | Current behavior |
-|---|---|---|
-| `GET` | `/api/v1/health` | Returns service status and configured dependency labels |
-| `GET` | `/api/v1/portfolio/summary` | Returns an empty decimal-string portfolio summary |
-| `GET` | `/api/v1/portfolio/positions` | Returns an empty list |
-| `GET` | `/api/v1/portfolio/orders` | Returns an empty list |
-| `POST` | `/api/v1/orders` | Parses the canonical order, applies an in-memory demonstration policy, and returns accepted/denied status |
-| `POST` | `/api/v1/orders/:id/cancel` | Returns a `CANCEL_PENDING` acknowledgement |
-| `POST` | `/api/v1/orders/emergency/close-all` | Returns an emergency-operation acknowledgement |
-| `GET` | `/api/v1/bots` | Returns an empty list |
-| `POST` | `/api/v1/bots/:id/pause` | Returns `PAUSED` |
-| `POST` | `/api/v1/bots/:id/resume` | Returns `ACTIVE` |
-| `POST` | `/api/v1/webhooks/tradingview/:endpointId` | Parses a TradingView payload and returns acceptance |
-
-These controllers are deliberately visible as initial transports: they do not currently authenticate, query Prisma, persist idempotency, publish BullMQ jobs, verify the reusable HMAC verifier, or call exchanges.
-
-### `apps/worker`
-
-The worker connects to `REDIS_URL` and starts one BullMQ worker per queue:
-
-- `orders`
-- `webhooks`
-- `bots`
-- `reconciliation`
-- `notifications`
-
-Concurrency defaults to `25` and can be set with `WORKER_CONCURRENCY`. Failed jobs produce structured JSON logs. `SIGINT` and `SIGTERM` close workers and Redis cleanly.
-
-The current processors are transport smoke implementations. They must be replaced with durable application services before production use.
-
-### `apps/mcp-server`
-
-The MCP service listens on `MCP_PORT`, defaulting to `4002`.
-
-- `POST /mcp` accepts MCP traffic (Streamable HTTP, JSON-RPC 2.0); `GET /health` returns service status.
-- Requests require `Authorization: Bearer <token>`; tokens are SHA-256 hashed and matched against the `McpClient` table.
-- Grants are created and revoked via the API under `POST /api/v1/mcp-clients` (a `POST /:id/revoke` revoke takes effect on the next request). The plaintext token is returned exactly once at creation.
-- Each grant scopes: allowed tools, exchange accounts, symbols (`*` wildcard, exact/base-symbol match), max leverage, max notional (enforced pre-enqueue for non-reduce-only `placeOrder`), and expiry.
-- Every tool call is audited to the `McpInvocation` table: tool, decision (`ALLOWED`/`DENIED`/`ERROR`), result code, latency, correlation id.
-- Sessions are per-client with a 10-minute idle cleanup; `MCP_REVOKED_TOKEN_HASHES` remains an additional denylist.
-- 21 tools are registered: read tools (`getPortfolio`, `getBalance`, `getPositions`, `getOrders`, `getMarketData`, `getMarkets`, `getOHLCV`, `getFundingRate`, `getOpenInterest`, `getRiskMetrics`, `getPerformance`, `getTradeHistory`) and write tools (`placeOrder`, `cancelOrder`, `closePosition`, `closeAll`, `changeLeverage`, `createBot`, `resumeBot`, `pauseBot`, `deleteBot`). Write tools route through the same commands/risk-engine/order-queue pipeline as the REST API.
-
-### `apps/web`
-
-The customer Next.js application is a responsive dark dashboard showing portfolio value, PnL, active bots, exchange connectivity, running trades, bot/webhook activity, risk-engine status, and a live-trading indicator. It is currently a static UI model, not a completed authenticated product flow.
-
-Default development URL: `http://localhost:3000`.
-
-### `apps/admin`
-
-The admin Next.js application is an operations view showing active users, order throughput, queue depth, latency, a global kill-switch control, service health, security events, exchange traffic, and incident data. It is currently a static UI model and its controls are not connected to backend mutation services.
-
-Default development URL: `http://localhost:3001`.
-
-## Shared packages
-
-### `packages/contracts`
-
-This package is the canonical boundary for data entering the domain.
-
-- Monetary and quantity values are strings matching decimal syntax. JavaScript floating-point values are not used at the persisted/domain boundary.
-- Positive values reject negative strings and zero.
-- Supported exchange IDs are `binance`, `bybit`, `okx`, `kucoin`, `kraken`, `coinbase`, `mexc`, and `hyperliquid`.
-- Market types are `SPOT`, `MARGIN`, `USDT_FUTURES`, `COIN_FUTURES`, and `PERPETUAL`.
-- Position sides are `LONG`, `SHORT`, and `BOTH`.
-- Order types include market, limit, stop, stop-market, stop-limit, take-profit, take-profit-market, and trailing-stop.
-- The order schema requires `price` or `stopPrice` when the selected order type needs it.
-- `clientOrderId` and `idempotencyKey` are mandatory.
-- TradingView signals include a nonce and ISO timestamp for replay controls.
-- `ApiProblem` models RFC 9457-style errors.
-- `RealtimeEnvelope` models versioned, sequenced, correlated events.
-
-### `packages/exchange-core`
-
-This package prevents API and worker code from depending directly on one exchange SDK.
-
-`ExchangeAdapter` requires implementations for connecting, balances, positions, open orders, placement, cancellation, modification, leverage, and margin mode. `AdapterCapabilities` makes unsupported behavior explicit. `ExchangeError` records a stable code plus `retryable` and `ambiguous` flags. The ambiguity flag is important: a request timeout may mean the exchange accepted the order even though the response was lost.
-
-### `packages/exchange-adapters`
-
-`CcxtExchangeAdapter` maps the common interface to CCXT.
-
-Implemented behavior:
-
-- loads exchange markets and verifies a balance request during connection;
-- normalizes balance, position, and order records;
-- creates, cancels, and conditionally edits orders;
-- gets/sets leverage and margin mode when CCXT reports support;
-- maps spot/margin/future/delivery/swap defaults from the canonical market type;
-- converts exchange network/rate-limit failures into retryable errors;
-- marks request timeouts as ambiguous;
-- rejects market types that the capability matrix does not claim.
-
-The matrix currently models Binance, Bybit, OKX, KuCoin, Kraken, Coinbase, MEXC, and Hyperliquid. Binance Spot, USDT-M, and COIN-M share the Binance adapter with different `MarketType` values.
-
-Important limitation: generic CCXT support is not the same as live certification. Precision, minimum notional, position mode, account mode, advanced order parameters, and permission behavior must be contract- and sandbox-tested per exchange before enabling funds.
-
-### `packages/trading-core`
-
-The order state machine permits only declared transitions between:
-
-`RECEIVED → VALIDATED → RISK_APPROVED → QUEUED → SUBMITTING → ACKNOWLEDGED → PARTIALLY_FILLED/FILLED`
-
-Cancellation, rejection, failure, and reconciliation branches are also explicit. Invalid transitions throw immediately.
-
-Position accounting:
-
-- represents the current direction as signed quantity;
-- computes weighted average entry when scaling in;
-- computes realized PnL when reducing or reversing;
-- resets average entry when flat;
-- computes direction-aware unrealized PnL;
-- creates a stop plus percentage-sized take-profit orders for bracket structures.
-
-Percentages supplied to `buildBracketOrders` are not currently checked to total 100; orchestration validation must enforce that in production.
-
-### `packages/risk-engine`
-
-`evaluateOrder` calculates notional and drawdown with `decimal.js`, then checks:
-
-- global/workspace trading enablement;
-- daily, weekly, and monthly loss limits;
-- maximum drawdown;
-- concurrent-position count;
-- total exposure;
-- leverage;
-- position size;
-- consecutive-loss cooldown.
-
-Reduce-only orders bypass controls that would otherwise prevent risk reduction. The package also provides a simplified long/short liquidation estimate and an in-memory circuit breaker that opens after a configured number of failures and resets after a configured interval.
-
-The liquidation formula is an estimate, not a substitute for exchange-specific maintenance-margin tiers, fees, funding, and portfolio-margin rules.
-
-### `packages/security`
-
-`EnvelopeEncryption` uses AES-256-GCM:
-
-- the master key must be exactly 32 bytes;
-- each encryption uses a random 12-byte IV;
-- ciphertext is authenticated with a GCM tag;
-- caller-supplied context is bound as additional authenticated data (AAD), preventing an envelope from being moved to a different record/context undetected;
-- envelopes record algorithm, version, IV, tag, ciphertext, and key ID.
-
-Additional helpers hash tokens with SHA-256, compare equal-length strings using constant-time comparison, and recursively redact keys matching secret/token/password/private-key/API-key patterns.
-
-Production should source the master key from KMS/HSM or a managed secret store rather than a checked-in environment file.
-
-### `packages/webhook`
-
-`TradingViewWebhookVerifier`:
-
-1. computes an HMAC-SHA256 over the exact raw request body;
-2. compares the supplied signature in constant time;
-3. parses the shared TradingView signal schema;
-4. rejects timestamps outside a default five-minute tolerance;
-5. atomically claims `<exchange>:<nonce>` through a caller-provided replay store;
-6. rejects a duplicate claim.
-
-The API webhook controller runs this verifier (HMAC over the raw body via `rawBody`, ±5-minute timestamp tolerance, Redis `SET NX EX` 300 s replay claims at `wh:replay:*`) and routes verified signals to active webhook bots; the signing secret is returned once at endpoint creation and never again.
-
-### `packages/bot-engine`
-
-The bot package defines ten strategy families: webhook, indicator, DCA, grid, scalping, trend, breakout, mean reversion, arbitrage, and custom.
-
-`BotRuntime` controls lifecycle transitions:
-
-- `DRAFT`, `PAUSED`, or `STOPPED` can activate;
-- only `ACTIVE` can pause;
-- any state can stop;
-- inactive bots ignore ticks and emit no orders;
-- active bots delegate to a `TradingStrategy` implementation.
-
-The webhook strategy (`WebhookSignalStrategy` + `buildWebhookOrders` in `packages/bot-engine/src/strategy.ts`) is implemented, unit-tested (14 tests), and live-verified; it converts TradingView actions (BUY/SELL/LONG/SHORT/REVERSE/CLOSE_LONG/CLOSE_SHORT/PARTIAL_EXIT) into entry + SL/TP bracket orders with per-bot idempotency keys. The other strategy families, persistent state, schedules, and market subscriptions are not implemented yet.
-
-### `packages/database`
-
-The Prisma schema uses PostgreSQL and stores monetary fields as `DECIMAL(36,18)`. Core models are described below. The generated client is emitted to `packages/database/generated/client` and should be regenerated after schema changes.
-
-## Database model
-
-| Model | Role and important constraints |
-|---|---|
-| `User` | Email identity, optional password, verification/disable timestamps, sessions, TOTP, memberships, audit relation |
-| `IdentityProvider` | Google/GitHub-style subject mapping; unique provider + subject |
-| `Session` | Hashed refresh token, device/IP data, expiry and revocation |
-| `TotpCredential` | One encrypted TOTP secret per user |
-| `Workspace` | Personal or organization tenant; live-trading flag and acknowledgement |
-| `WorkspaceMember` | User/workspace role and invite/active/suspended status; unique membership |
-| `ExchangeAccount` | Tenant-owned exchange + market account and connection/trading state |
-| `ExchangeCredential` | Versioned encrypted credential envelope, fingerprint, permissions, lifecycle |
-| `RiskPolicy` | One workspace policy for losses, drawdown, exposure, leverage, size, cooldown, and trading status |
-| `OrderIntent` | Canonical order command and state; unique workspace idempotency key and exchange client order ID |
-| `Execution` | Fill record; unique exchange execution ID per order |
-| `Position` | One exchange-account/symbol/side position with entry, mark, liquidation, leverage, and PnL |
-| `Bot` | Strategy identity, status, configuration, schedule, active version, and heartbeat |
-| `BotVersion` | Immutable version/checksum record |
-| `BotRun` | Runtime interval and metrics |
-| `WebhookEndpoint` | Tenant endpoint, token hash, encrypted signing secret, active state |
-| `WebhookDelivery` | Nonce, payload hash, attempts, state, and error; nonce unique per endpoint |
-| `McpClient` | Hashed token and scoped tools/accounts/symbols/leverage/notional/expiry/revocation |
-| `McpInvocation` | Tool invocation decision, result, latency, and correlation audit |
-| `AuditEvent` | Actor, action, resource, severity, correlation, request metadata, and timestamp |
-| `OutboxEvent` | Durable event awaiting publication |
-| `IdempotencyRecord` | Request hash and cached response with expiry; unique key per workspace |
-
-Tenant-owned aggregates carry `workspaceId`. Service code must always authorize the requested workspace and must never accept tenant ownership solely from an untrusted body.
-
-The repository currently contains the schema but not a checked-in SQL migration history. Create and review migrations before staging deployment.
-
-## Exchange integration
-
-To instantiate an adapter:
-
-```ts
-import { createExchangeAdapter } from "@platform/exchange-adapters";
-
-const adapter = createExchangeAdapter("binance", "USDT_FUTURES");
-await adapter.connect({ apiKey, secret });
-```
-
-Exchange credentials can include API key, secret, passphrase, wallet address, and private key. Only fields needed by the selected exchange should be supplied.
-
-The adapter boundary uses decimal strings in canonical records, but CCXT order submission currently converts quantity and price to JavaScript numbers because CCXT's unified method expects numeric arguments. Before production, each adapter must apply exchange precision using loaded market metadata and verify that conversion cannot exceed permitted precision or safe numeric range.
-
-Recommended certification levels are defined in `docs/exchange-certification.md`:
-
-1. contract-tested;
-2. sandbox/testnet-tested;
-3. live smoke-tested with restricted credentials and minimal notional.
-
-No adapter should be advertised at a higher level without stored evidence.
-
-## Trading and futures behavior
-
-The canonical model supports:
-
-- spot, margin, USDT futures, COIN futures, and perpetual markets;
-- buy/sell orders;
-- `LONG`, `SHORT`, and `BOTH` position sides;
-- cross and isolated margin (product rule: **only ISOLATED** is accepted; `CROSS` requests are rejected with 400, and the worker always calls `setMarginMode` on non-spot executions);
-- optional leverage up to the schema limit of 200;
-- reduce-only and post-only flags;
-- market, limit, stop, take-profit, and trailing-stop families;
-- scaling, partial reduction, flattening, and reversal accounting;
-- stop-loss and multiple percentage-based take-profit children.
-
-Exchange reality differs. Hedge mode, one-way mode, leverage scope, margin-mode transition rules, reduce-only behavior, trigger direction, and conditional-order parameters must be normalized per exchange. Capability flags should fail unsupported operations before submission.
-
-Bybit specifics implemented and live-proven: for BYBIT non-spot accounts, `placeOrder` maps `LONG`/`SHORT` to hedged-mode `positionIdx` 1/2; conditional (stop/TP) orders submit through the v5 `order/create` endpoint with `orderType: Market`, `triggerPrice`, numeric `triggerDirection` (1 = rising, 2 = falling, derived from side + profit/stop family), `triggerBy: LastPrice`, and `reduceOnly`; the ccxt 4.5 `createOrder` trigger path is bypassed because it mis-maps conditional types on this account mode. SL/TP brackets (reduce-only market triggers) are live-verified end to end.
-
-## Risk controls
-
-Risk checks run in `evaluateOrder` (risk-engine) and `sizeOrder` (trading-core) at command acceptance. Sizing is margin-aware and precision-safe: order quantity is step-aligned to the exchange market (`alignAmount`) and rejected with `PRECISION_REJECTED` when below `amountMin`; bracket prices are snapped to the tick (`alignPrice`). A 10-minute in-memory market-precision cache (`marketPrecisionOf`) avoids repeated `getMarkets` calls.
-
-Operational halts (all live, verified end-to-end on Bybit mainnet):
-
-- **Workspace kill switch** — `Workspace.liveTradingEnabled`. Flipped via `PATCH /api/v1/workspaces/me { enabled }`; `POST /orders` → 409 `LIVE_TRADING_DISABLED`, webhook ingress → 403. The dashboard Risk Controls panel exposes Kill / Resume and Close-all positions.
-- **Daily-loss circuit breaker** — `Workspace.dailyLossLimit` (USDT, cleared with `null`). `checkCircuitBreaker` is called by the API `placeOrder` path (409 `DAILY_LOSS_LIMIT_BREACHED`) and by the worker `runBotEvaluation` before any bot order is built (run marked STOPPED, CRITICAL `breaker` notification emitted, deduped per day).
-- **Emergency close-all** — `POST /api/v1/orders/emergency/close-all` is deliberately NOT gated; it persists reduce-only market orders through the execute pipeline so fills record executions and realized PnL.
-- **Bot lifecycle** — per-bot pause / resume / stop endpoints; status checked at run time.
-
-Account-level toggles (`exchangeAccount.tradingEnabled`, certification) and per-account acknowledge gates remain in force. The admin dashboard kill-switch noted below is superseded by the workspace risk panel on `/dashboard`.
-
-## Email alerts
-
-The worker's `createNotification` processor optionally forwards notifications to email when `SMTP_URL` and `ALERT_EMAIL_TO` are set (`ALERT_EMAIL_FROM`, `ALERT_EMAIL_SEVERITY` — default `WARN`, so WARN+ and CRITICAL notify). Sending is fire-and-forget and never fails the queue job; `emailSent` is reported on the notify job result.
-
-## TradingView webhooks
-
-Canonical signal fields include:
-
-- `exchange`
-- `symbol`
-- `action`: buy, sell, long, short, close long/short, reverse, set leverage, move stop, or partial exit
-- `size`
-- optional leverage, stop loss, take-profit array, reduce-only, and close percentage
-- required `nonce`
-- required ISO `timestamp`
-
-The production endpoint preserves the raw body (Nest `rawBody`), loads the endpoint signing secret, verifies HMAC-SHA256 of the raw bytes plus a ±5 min timestamp tolerance and a Redis replay claim (`wh:replay:{endpointId}:{exchange}:{nonce}`), persists a `WebhookDelivery`, returns `202`, and processes the signal asynchronously via the worker (`processWebhook`). Unsigned requests are rejected unless `WEBHOOK_REQUIRE_SIGNATURE=false`. The signing secret is returned once at endpoint creation (`signingSecret`). Verified live: signed BUY/CLOSE flows, corrupted-signature 401, replay 401, stale timestamp 401, breaker-blocked runs.
-
-## Bots
-
-Bots are scoped to a workspace and exchange account. Configuration is stored as JSON with immutable versions and checksums. A production scheduler should enqueue a bot tick/run with a version identifier, acquire a lease/fencing token, load canonical market data, execute the selected strategy, run every proposed order through the shared command/risk path, and update heartbeat/run metrics.
-
-Pause and stop must be checked before each tick and again before each order reaches an exchange. Setup-time authorization does not eliminate the need for these runtime toggles.
-
-## MCP server
-
-The MCP server currently registers these read tools:
-
-- `getPortfolio`
-- `getBalance`
-- `getPositions`
-- `getOrders`
-- `getMarketData`
-- `getOHLCV`
-- `getFundingRate`
-- `getOpenInterest`
-- `getIndicators`
-- `getPerformance`
-- `getTradeHistory`
-- `getRiskMetrics`
-
-Mutation tools:
-
-- `placeOrder`
-- `cancelOrder`
-- `closePosition`
-- `modifyPosition`
-- `changeLeverage`
-- `createBot`
-- `pauseBot`
-- `resumeBot`
-- `deleteBot`
-
-The product authorization rule is setup-time approval rather than approval for every trade. The corresponding persisted grant model is `McpClient` (`apps/mcp-server/src/grant.ts`): it can restrict tools, exchange accounts, symbols, leverage, notional, expiration, and revocation, and the grant checks are unit-tested. Live-connection of every read/mutation tool to the shared order services is incremental work.
-
-## REST, GraphQL, and WebSockets
-
-### REST
-
-REST commands live under `/api/v1`. The intended production convention is:
-
-- bearer authentication;
-- explicit workspace context;
-- `Idempotency-Key` on trading mutations;
-- decimal strings;
-- correlation IDs;
-- RFC 9457 problem responses;
-- cursor pagination for mutable/high-volume collections.
-
-The checked-in contract is `docs/openapi.yaml`; generated Swagger from current controllers is served at `/docs` while the API runs.
-
-### GraphQL
-
-`docs/schema.graphql` defines planned read models for dashboards, portfolios, exchange capabilities, bot performance, and system health. GraphQL dependencies are present in the API package, but no GraphQL module/resolvers are currently registered. Commands should remain REST/MCP because their idempotency and audit semantics must be explicit.
-
-### WebSockets
-
-Socket.IO uses the `/realtime` namespace. The current gateway acknowledges a `subscribe` message containing topic names. The production protocol in `docs/websocket.md` defines authentication, versioned envelopes, sequence numbers, resume cursors, snapshots, heartbeat, and backpressure. Redis fan-out and persisted/resumable delivery are not yet implemented.
-
-## Security model
-
-Implemented primitives:
-
-- Helmet headers and configured CORS;
-- AES-256-GCM envelope encryption with AAD context binding;
-- hashed MCP revocation matching;
-- constant-time signature comparison;
-- recursive log redaction;
-- signed/replay-protected webhook verifier;
-- token/session/credential/grant fields in the data model;
-- explicit idempotency and audit models;
-- strict TypeScript and payload schemas.
-
-Designed but not yet fully wired:
-
-- Argon2id password hashing;
-- Google/GitHub OAuth with PKCE;
-- email verification and password reset;
-- rotating hashed refresh tokens;
-- TOTP enrollment, step-up, and recovery;
-- RBAC guards and organization invitations;
-- credential create/test/rotate/revoke services;
-- KMS/HSM key provider;
-- persisted MCP grant authorization;
-- rate limiting and abuse controls;
-- append-only audit application service;
-- secret-safe structured telemetry.
-
-Never commit `.env`, exchange credentials, signing secrets, JWT secrets, or real MCP bearer tokens.
-
-## Configuration
-
-Copy `.env.example` to `.env` for local development and replace all examples.
-
-| Variable | Used/intended by | Meaning |
-|---|---|---|
-| `NODE_ENV` | All services | Runtime mode |
-| `DATABASE_URL` | Prisma/API/workers | PostgreSQL connection string |
-| `REDIS_URL` | Workers/queues/replay | Redis connection string |
-| `JWT_ACCESS_SECRET` | Planned auth service | Access-token signing secret; use at least 32 random characters |
-| `JWT_REFRESH_SECRET` | Planned auth service | Separate refresh-token signing secret |
-| `ENCRYPTION_MASTER_KEY_BASE64` | Security/credential service | Base64 encoding of exactly 32 random bytes |
-| `WEBHOOK_SIGNING_SECRET` | Webhook service | Local/default signing secret; production endpoints should have independent secrets |
-| `API_URL` | Server-side clients | API origin |
-| `NEXT_PUBLIC_API_URL` | Browser UI | Public REST base URL |
-| `NEXT_PUBLIC_WS_URL` | Browser UI | Public realtime URL |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Planned OAuth | Google application credentials |
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | Planned OAuth | GitHub OAuth credentials |
-| `SMTP_URL` | Planned email service | SMTP endpoint; Mailpit is local default |
-| `MCP_PORT` | MCP server | Listening port, default `4002` |
-| `MCP_REVOKED_TOKEN_HASHES` | MCP server | Comma-separated SHA-256 hashes denied by the initial transport |
-| `PORT` | API | API listening port, default `4000` |
-| `CORS_ORIGINS` | API | Comma-separated allowed browser origins |
-| `WORKER_CONCURRENCY` | Worker | Per-queue concurrency, default `25` |
-
-Generate a local encryption key with a cryptographically secure tool, for example Node.js:
-
-```bash
-node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
-```
-
-Do not reuse development secrets in staging or production.
+- **Persistence**: MongoDB, single database `tradingbot`. Prisma models: `ExchangeAccount` (encrypted `apiSecret`, `isPrimary`), `Bot` (bound `exchangeAccountId`, JSON config, versions), `BotRun` (metrics), `OrderIntent` (exchangeAccountId + `source` records origin: webhook/MCP/manual), `Execution`, `Position`, `WebhookEndpoint` (+ encrypted signing secret), `WebhookDelivery` (nonce replay claims), `Notification`, `Settings` (kill switch, daily loss limit, equity/peak).
+- **Clock handling**: this VM drifts; the Bybit adapter always sets `recvWindow: 30000` + `adjustForTimeDifference: true` — requests fail with 10002 otherwise. Never disable.
+- **Risk pipeline** (`evaluateOrder`): trading enablement → daily-loss breaker → margin vs. equity → min-notional ($10 futures / $5 spot floor) → leverage bounds → size alignment to exchange precision (`alignAmount`/`alignPrice`, `PRECISION_REJECTED` below `amountMin`).
+- **Futures details**: `LONG`/`SHORT` map to hedged-mode `positionIdx` 1/2; SL/TP brackets are reduce-only conditional trigger orders (`orderType: Market`, `triggerPrice`, `triggerDirection`, `triggerBy: LastPrice`); only **ISOLATED** margin is accepted.
 
 ## Local development
 
-### Prerequisites
+Prerequisites on this machine: Node 22, MongoDB **7.0.14** (the 8.0.4 binary crashes on this 2014 CPU — see [Troubleshooting](#troubleshooting)).
 
-- Node.js 22 or newer
-- pnpm 11.18.0 through Corepack
-- Docker with Compose
-- available ports: `3000`, `3001`, `4000`, `4002`, `5432`, `6379`, `8025`, and `1025`
-
-### Start dependencies
-
-```bash
-corepack enable
-cp .env.example .env
-docker compose up -d postgres redis mailpit
-pnpm install
-pnpm db:generate
-pnpm db:validate
-```
-
-`pnpm-workspace.yaml` includes an explicit dependency build-script allowlist. Prisma, CCXT, esbuild, Sharp, and selected optional native performance packages are allowed; Scarf is explicitly denied.
-
-### Database setup
-
-The schema validates and the client generates, but there is no committed migration history yet. Local schema changes are applied with `prisma db push` (note: the wasm validator rejects string-literal `@default('x')` attributes - use enums or bare identifiers). For staging/production, generate migrations in a controlled branch, review the SQL, test forward/backward compatibility, and deploy with `prisma migrate deploy` rather than `db push`.
-
-> [!NOTE]
-> BullMQ 5.x prints a warning on Redis < 6.2. Local dev on Windows uses the portable Redis 5.0.14.1 (port 6380, `REDIS_URL=redis://localhost:6380`); it works but the warning is expected. Render's managed Redis and the `docker-compose.yml` Redis 7.4 both satisfy 6.2+.
-
-### Run services
-
-```bash
-pnpm dev
-```
-
-Expected local endpoints:
-
-- Customer UI: `http://localhost:3000`
-- Admin UI: `http://localhost:3001`
-- API: `http://localhost:4000/api/v1`
-- Swagger UI: `http://localhost:4000/docs`
-- MCP: `http://localhost:4002/mcp`
-- MCP health: `http://localhost:4002/health`
-- Mailpit UI: `http://localhost:8025`
-
-Because the API and worker now persist orders, executions, positions, notifications, and reconciliations, this is a complete trading environment; `pnpm dev` (or the per-service start commands below) runs the real end-to-end path, including live orders when the workspace and account are live-acknowledged.
-
-### Stop dependencies
-
-```bash
-docker compose down
-```
-
-Add `-v` only when you intentionally want to remove the local PostgreSQL and Redis volumes.
-
-## Commands and quality gates
-
-Root commands:
-
-| Command | Purpose |
-|---|---|
-| `pnpm dev` | Run all development tasks in parallel |
-| `pnpm build` | Build the workspace through Turborepo |
-| `pnpm lint` | Run package lint tasks |
-| `pnpm typecheck` | Run strict TypeScript checks |
-| `pnpm test` | Run package unit tests |
-| `pnpm test:coverage` | Run coverage variants |
-| `pnpm db:generate` | Generate Prisma Client |
-| `pnpm db:validate` | Validate the Prisma schema |
-| `pnpm docs:check` | Check that required documents exist and are substantive |
-| `pnpm quality` | Lint, type-check, test, validate Prisma/docs, and build |
-
-Current verified baseline:
-
-- Prisma schema valid and client generated;
-- ESLint passes for first-party apps and packages;
-- strict TypeScript passes for all projects;
-- ~50 unit tests pass across the security, auth, risk, trading-core (15), adapters (11), bot-engine (14), commands (5), and webhook suites;
-- all shared packages and backend services compile;
-- customer and admin Next.js production builds pass;
-- 12 required documentation artifacts pass `scripts/check-docs.mjs`.
-
-Unit tests cover encryption/context binding and redaction, order-state/position/PnL behavior (including FIFO realized PnL), risk/liquidation behavior, webhook verification, bot strategy order building, and credential grants. They do not yet cover the full service integration surface.
-
-## Deployment
-
-### Docker
-
-`infra/docker/Dockerfile` builds the whole monorepo, creates an unprivileged `platform` user, and defaults to starting `apps/api/dist/main.js`. Render overrides the command for the worker and MCP server.
-
-The current runtime stage copies the complete build tree, including development dependencies. Before production, split service-specific runtime images or use pnpm deploy/pruning, add a read-only filesystem where possible, pin image digests, and run an image vulnerability/license/SBOM gate.
-
-### Render staging
-
-`infra/render/render.yaml` defines a complete staging blueprint:
-
-- `trading-api-staging` (web, port 4000, health `/api/v1/health`)
-- `trading-worker-staging` (worker, BullMQ queues)
-- `trading-mcp-staging` (MCP-over-HTTP, health `/health`)
-- `trading-redis-staging` (managed Redis - the managed tier runs Redis 6.2+, satisfying BullMQ's requirement; only the local dev Windows Redis is 5.0.14)
-- `trading-postgres-staging` (managed Postgres)
-
-Secrets (`JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `WEBHOOK_SIGNING_SECRET`, `ENCRYPTION_KEY`) are auto-generated by Render; `BYBIT_API_KEY`, `BYBIT_SECRET_KEY`, `SMTP_URL`, and `ALERT_EMAIL_TO` must be synced from your secrets manager. The API image CMD is overridden per service; the worker and MCP use their own `dist/main.js`. Customer/admin web services are not defined yet.
-
-### Backups
-
-`scripts/backup.ps1` produces a timestamped custom-format dump (`pg_dump --format=custom`, `--no-owner`) of the `DATABASE_URL` database from `.env`. Restore with:
+### 1. Start MongoDB (replica set — required for Prisma transactions)
 
 ```powershell
-& "C:\Program Files\PostgreSQL\17\bin\pg_restore.exe" --clean --if-exists --no-owner -d "<DATABASE_URL minus ?schema=...>" "backups\tradingbot-<stamp>.dump"
+& "C:\Users\saifs\AppData\Local\MongoDB\v7\mongodb-win32-x86_64-windows-7.0.14\bin\mongod.exe" --dbpath C:\Users\saifs\AppData\Local\MongoDB\data --port 27017 --bind_ip 127.0.0.1 --replSet rs0 --wiredTigerEngineConfigString "log=(compressor=zlib)" --logpath C:\Users\saifs\AppData\Local\Temp\opencode\mongod.log
 ```
 
-A restore drill (scratch database -> restore -> row count -> drop) passed on this session's backup. Schema migrations: local changes apply via `prisma db push`; for staging/production generate a migration on a controlled branch and use `prisma migrate deploy` (or the managed Postgres snapshot).
+If the data dir is fresh, initiate the replica set once (root `npm i --no-save mongodb`; `mongosh` is broken here):
 
-### Kubernetes production base
+```js
+new MongoClient('mongodb://127.0.0.1:27017/?directConnection=true')
+  .db('admin').command({ replSetInitiate: { _id: 'rs0', members: [{ _id: 0, host: '127.0.0.1:27017' }] } });
+```
 
-`infra/kubernetes/platform.yaml` currently supplies:
+### 2. Configure and push the schema
 
-- namespace `trading-platform`;
-- API deployment with three replicas;
-- readiness and liveness probes;
-- service;
-- CPU HPA from 3 to 50 replicas;
-- PodDisruptionBudget with two minimum available;
-- default-deny ingress and egress policy.
+```powershell
+node --env-file-if-exists=../../.env ../../node_modules/prisma/build/index.js db push --schema prisma/schema.prisma
+```
 
-It is a base, not a complete production manifest. Replace the example image, add worker/MCP/web/admin deployments, secrets/config, service accounts, ingress/TLS, explicit network-policy allows, topology spread/anti-affinity, graceful termination, migration jobs, observability agents, and managed database/Redis access.
+(run from `packages/database`; deps are hoisted to the root `node_modules`). Note the Prisma 6.x wasm validator rejects string-literal defaults — use enums or bare identifiers.
 
-### CI/CD
+### 3. Run the app
 
-`.github/workflows/ci.yml`:
+```powershell
+# load root .env into the process, then start the production build
+Get-Content .env | ForEach-Object { if ($_ -match '^([A-Z0-9_]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') } }
+Start-Process node -ArgumentList @('"D:\crypto_data\Trading bot mcp\node_modules\next\dist\bin\next"','start','-p','3000') -WorkingDirectory "D:\crypto_data\Trading bot mcp\apps\web"
+```
 
-1. starts PostgreSQL and Redis service containers;
-2. installs pnpm 11.18.0 and Node.js 22;
-3. installs with a frozen lockfile;
-4. generates Prisma Client;
-5. runs the quality gate;
-6. scans the filesystem with Trivy for high/critical findings;
-7. on `main`, builds and publishes the image to GitHub Container Registry.
+(or `next dev` for development). App: `http://localhost:3000`.
 
-Before production, pin third-party actions by commit SHA, configure environments/approvals, sign images, generate provenance/SBOM, scan the built image, run migrations as a controlled job, deploy progressively, and verify rollback.
+A full end-to-end smoke script lives at `C:\Users\saifs\AppData\Local\Temp\opencode\smoke-web.mjs` (login → account → bot → signed webhook → MCP; expects a fresh DB).
 
-## Observability and operations
+## Building, testing, linting
 
-The target stack is Prometheus, Grafana, and OpenTelemetry. What exists today: a `GET /health` endpoint (Postgres + Redis probes), structured worker logs per queue/job, a notifications queue with per-run and per-delivery notifications surfaced in the customer dashboard (unread badge, mark-read), and email alerts through `sendEmailAlert` (nodemailer; no-op when `SMTP_URL` is unset). Metrics exporters, traces, dashboards, alert rules, SLOs, and collector deployment files are not yet implemented.
+```powershell
+# rebuild a package dist (do this before next build after package edits)
+node --env-file=.env node_modules\typescript\bin\tsc -p packages\<pkg>\tsconfig.json
 
-Production operations should monitor at minimum:
+# unit tests (security, commands, webhook, risk, trading-core, adapters, bot-engine)
+node --env-file=.env node_modules\typescript\bin\tsc -p packages\<pkg>\tsconfig.json; node --env-file=.env node_modules\vitest\...   # see package scripts
 
-- API latency/error/saturation;
-- queue depth, age, retries, dead letters, and reconciliation backlog;
-- exchange request latency, rate-limit headroom, ambiguous errors, and credential failures;
-- webhook acceptance, signature failures, replay attempts, and processing latency;
-- order-state age and transition anomalies;
-- position divergence and stale market data;
-- bot heartbeat/state/version;
-- risk denials and kill-switch transitions;
-- PostgreSQL connections/locks/replication/backup age;
-- Redis memory, persistence, evictions, and failover;
-- MCP denials, mutation volume, latency, and grant expiry.
+# Next.js production build (local workarounds needed on this machine, see Troubleshooting)
+$env:NODE_OPTIONS='--require C:\Users\saifs\AppData\Local\Temp\opencode\eperm-skip.cjs'
+node "D:\crypto_data\Trading bot mcp\node_modules\next\dist\bin\next" build
+```
 
-Backups, point-in-time recovery, key rotation, credential rotation, exchange outage, Redis failover, queue poison-message, database restore, and regional recovery need rehearsed runbooks and evidence.
+## Deployment (Vercel)
 
-## Current implementation status
+The production site is deployed from this repo to Vercel:
 
-### Implemented and validated
+1. **From the repo root** — `node "C:\Users\saifs\AppData\Roaming\npm\node_modules\vercel\dist\vc.js" deploy --prod`. Never use `--prebuilt` (cloud assembly fails on missing filePathMap refs) and never deploy from `apps/web` (rootDirectory would double-append).
+2. **Environment** — set all vars in the Vercel project dashboard (same as `.env`; `DATABASE_URL` pointing at Atlas).
+3. **Build hook** — `scripts/vercel-build.mjs` copies the Prisma engine into `.next/server/` and registers it in `required-server-files.json` so every Lambda can find it (otherwise `/api/health` 503s with "Query Engine not located").
+4. **Region** — `apps/web/vercel.json` pins every API route to `hkg1`. Do not change: Bybit's CloudFront geo-blocks US datacenters (403), which made `/api/markets` fail from iad1.
+5. **Atlas** — the cluster's IP access list must allow `0.0.0.0/0` for Vercel egress (otherwise TLS `InternalError`). Use a direct multi-host URI (this machine's DNS refuses SRV records).
+6. **Cron** — add a scheduled function/cron hitting `/api/cron` with `x-cron-secret`.
+7. **Deploy records** — the current live deployment is `web-e3zzigzfu-md-sami-s-projects.vercel.app` → alias `web-blue-delta-17.vercel.app`.
 
-- pnpm/Turborepo monorepo and strict TypeScript configuration;
-- canonical Zod order and webhook contracts;
-- common exchange adapter and CCXT implementation for the requested exchange families;
-- order state machine and long/short position/PnL primitives;
-- bracket-order generation;
-- risk checks, liquidation estimate, and circuit breaker;
-- AES-256-GCM envelope encryption and redaction primitives;
-- TradingView HMAC/timestamp/replay verifier;
-- bot lifecycle and strategy interface;
-- multi-tenant Prisma schema;
-- initial NestJS, worker, MCP, customer, and admin applications;
-- local Docker dependencies, Docker image, Render staging base, Kubernetes base, and CI;
-- backup + verified restore drill (`scripts/backup.ps1`, pg_dump custom format; restore proven against a scratch database);
-- OpenAPI, AsyncAPI, GraphQL SDL, WebSocket, security, database, deployment, and architecture documentation;
-- clean lint, type checks, unit tests, package/backend builds, and Next.js production builds.
+On a fresh `npm install`, re-apply the local build workarounds (nft home-glob patch + `eperm-skip.cjs`) — the Vercel cloud build needs none of them.
 
-### Not yet production-complete
+## Troubleshooting
 
-- Google/GitHub OAuth;
-- TOTP enrollment/recovery and step-up;
-- verification/reset emails and session rotation;
-- persistent RBAC/invitations and tenant guards;
-- SQL migration history (schema is applied via `prisma db push`);
-- transactional idempotency/outbox/audit application services;
-- complete advanced-order orchestration (trailing stops, OCO on-exchange);
-- market-data collectors and indicators;
-- GraphQL server/resolvers;
-- resumable realtime fan-out;
-- customer/admin interactive product flows;
-- integration and end-to-end suites;
-- performance, 100,000-webhook, and chaos evidence;
-- Prometheus/Grafana/OpenTelemetry runtime assets;
-- complete Render/Kubernetes production configuration;
-- backup/restore, failover, security review, and operational certification.
-
-### Live-verified on Bybit mainnet (funded account)
-
-- full round trip: `POST /orders` market buy (156 DOGE, ~$11, 1x ISOLATED) -> FILLED with real fee (0.00602488 USDT) -> position ledger row (LONG 156 @ 0.07022, mark synced by the `sync-positions` reconciliation job) -> reduce-only market sell close FILLED (fee 0.00602917) -> ledger flat with realized `-0.00425405` (matches `gross +0.0078 - fees 0.012054` exactly);
-- stop-loss/take-profit bracket orders placed live on-exchange as reduce-only conditional trigger orders (`STOP_MARKET` / `TAKE_PROFIT_MARKET` ACKNOWLEDGED with exchange order IDs, then cancelled);
-- sizing/risk verified against a real $15 balance: FIXED_AMOUNT allocation, min-notional floor, margin-vs-equity, and drawdown checks all behaved;
-- credential certification (`VERIFIED`), workspace/account live-trading acknowledgment, and the 409 risk/sizing rejection paths exercised;
-- two latent bugs found and fixed during this verification: quote-currency extraction for `USDT:USDT` symbols (`split('/')[1]` yielded `USDT:USDT` -> equity 0 -> false "margin exceeds equity"), and equity sourced from *free* instead of *total* balance (an open position dropped free balance, producing phantom ~73% drawdowns that blocked SL/TP placement).
-
-### Live-trading gate
-
-Do not enable real funds merely because the project compiles. A workspace should be allowed to trade only after all of the following are true:
-
-1. authentication, authorization, audit, and tenant isolation are integration-tested;
-2. credentials are encrypted, permission-checked, rotation-tested, and restricted from withdrawals;
-3. risk policy and layered kill switches are persisted and rechecked in workers;
-4. idempotency and reconciliation have passed outage/timeout tests;
-5. the selected exchange/market/account mode is sandbox- and live-smoke-certified;
-6. precision, notional, fee, funding, liquidation, and position-mode behavior is verified;
-7. alerts, backups, restores, incident procedures, and rollback have been exercised;
-8. the user has explicitly acknowledged live trading and enabled the workspace/account/bot toggles.
-
-Until then, use development mocks or a purpose-built paper/testnet execution adapter.
-
-## Documentation index
-
-| File | Content |
+| Symptom | Cause / fix |
 |---|---|
-| `docs/architecture.md` | Control/execution/data planes, reliability, scale, and security design |
-| `docs/architecture-overview.html` | Visual architecture overview |
-| `docs/database.md` | Decimal, tenancy, credential, order, partition, and pooling decisions |
-| `docs/er-diagram.md` | Mermaid entity-relationship diagram |
-| `docs/api.md` | REST, GraphQL, and MCP design responsibilities |
-| `docs/openapi.yaml` | Checked-in OpenAPI 3.1 contract |
-| `docs/schema.graphql` | Planned GraphQL read schema |
-| `docs/websocket.md` | Realtime authentication, topics, sequence/resume, heartbeat, and backpressure |
-| `docs/asyncapi.yaml` | Realtime channel contract |
-| `docs/security.md` | Identity, encryption, webhook, MCP, and execution security design |
-| `docs/deployment.md` | Render staging and Kubernetes production guidance |
-| `docs/exchange-certification.md` | Contract, sandbox, and live-smoke certification levels |
+| Markets never load; infinite spinner | Bybit geo-blocks the region. API routes must run in `hkg1` (`apps/web/vercel.json`). Locally this is not an issue. |
+| `/api/health` → 503 "Query Engine not located" | Prisma engine missing from the Lambda — rerun a deploy; `scripts/vercel-build.mjs` copies it into `.next/server`. |
+| Bybit API errors with code `10002` | Clock skew — never remove `recvWindow: 30000` / `adjustForTimeDifference: true` from the adapter. |
+| Webhook returns 401 `WEBHOOK_VERIFICATION_FAILED` | Wrong signature (sign the raw body exactly), timestamp older than 5 minutes, or a replayed nonce. |
+| "Order value below minimum of $10" / "margin exceeds available equity" | Normal risk skips for small balances — the run records the reason in `skipped`. |
+| Local mongod crashes with `0xC000001D` | MongoDB 8.0.4 needs AVX2; this 2014 CPU lacks it. Use 7.0.14. If it won't restart after an unclean shutdown: stop it, wipe the data dir, restart, re-initiate the replica set (dev data is disposable). |
+| Local `next build` dies on EPERM/home globs | Re-apply the nft patch + run with `NODE_OPTIONS=--require ...\eperm-skip.cjs`. |
+| Session cookie not sent from PowerShell | Cookie is Secure in production; use the Node smoke script (manual `Cookie` header) or HTTPS. |
+| `vercel deploy --prebuilt` fails with ENOENT | Use plain `vercel deploy --prod` from the repo root (cloud build). |
 
-## Final safety note
+## Safety
 
-Cryptocurrency trading and leveraged derivatives can cause rapid, total, or greater-than-deposit losses depending on venue and jurisdiction. Software controls reduce operational risk but do not remove market, exchange, custody, liquidity, model, or legal risk. Treat every live-trading release as a security- and safety-critical system change.
+- This software places live orders on Bybit with **real funds** when a signal arrives. Test with minimal amounts on a separate API key first; keep the global trading toggle off until you're confident.
+- Every bot is bound to its own exchange API — revoke a key on Bybit to instantly kill everything using it.
+- The daily-loss limit and trading toggle are your primary risk stops; the emergency close-all is your last resort.
+- Monitor webhook deliveries (Webhooks page) and bot runs (Bots page) — `routed`/`failed` and `skipped` reasons tell you what actually happened.
+- The MCP write tools are live-fire: do not hand the `MCP_PASSWORD` to an untrusted agent.
+- Cryptocurrency and leveraged derivatives can cause rapid, total, or greater-than-deposit losses. Software controls reduce operational risk, not market risk.

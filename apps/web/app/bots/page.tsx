@@ -81,7 +81,7 @@ function formatConfig(config: BotConfig): string {
   return parts.join(' · ');
 }
 
-function SymbolPicker({ markets, selected, onChange }: { markets: Market[] | null; selected: string[]; onChange: (next: string[]) => void }) {
+function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, onChange }: { markets: Market[] | null; marketsError: string | null; onRetryMarkets: () => void; selected: string[]; onChange: (next: string[]) => void }) {
   const [query, setQuery] = useState('');
   const [custom, setCustom] = useState('');
 
@@ -110,7 +110,13 @@ function SymbolPicker({ markets, selected, onChange }: { markets: Market[] | nul
         </div>
       </div>
       <div className="symbol-list">
-        {!markets && <p className="muted small">Loading markets from the exchange…</p>}
+        {!markets && !marketsError && <p className="muted small">Loading markets from the exchange…</p>}
+        {!markets && marketsError && (
+          <div className="symbol-error">
+            <p className="muted small">{marketsError}</p>
+            <button className="secondary" onClick={onRetryMarkets} type="button"><RefreshCw size={13} /> Retry</button>
+          </div>
+        )}
         {markets && markets.length === 0 && <p className="muted small">No markets returned by the exchange.</p>}
         {markets && matching.length === 0 && queryUpper && <p className="muted small">No matching markets.</p>}
         {orphaned.map((symbol) => (
@@ -146,6 +152,7 @@ export default function BotsConsole() {
 
 function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNotice: ShellContext['setNotice']; signOut: ShellContext['signOut'] }) {
   const [markets, setMarkets] = useState<Market[] | null>(null);
+  const [marketsError, setMarketsError] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<ExchangeAccountRef[]>([]);
   const [bots, setBots] = useState<BotSummary[]>([]);
   const [selected, setSelected] = useState<BotDetail | null>(null);
@@ -161,8 +168,10 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
     try {
       const data = await apiFetch<{ symbols: Market[] }>('/api/markets?quote=USDT', session);
       setMarkets(data.symbols);
-    } catch {
+      setMarketsError(null);
+    } catch (error) {
       setMarkets(null);
+      setMarketsError(error instanceof Error ? error.message : 'Failed to load markets from the exchange.');
     }
   }, [session]);
 
@@ -482,7 +491,7 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
                   {selected && selected.exchangeAccount ? `${selected.exchangeAccount.label ?? selected.exchangeAccount.exchange} ${selected.exchangeAccount.marketType}` : 'bound at creation'}
                 </p>
               )}
-              <SymbolPicker markets={markets} onChange={setSymbols} selected={symbols} />
+              <SymbolPicker markets={markets} marketsError={marketsError} onRetryMarkets={() => void loadMarkets()} onChange={setSymbols} selected={symbols} />
               <div className="form-row">
                 <label>Allocation mode<select defaultValue={prefill?.allocation?.mode ?? 'NONE'} name="allocationMode">{ALLOCATION_OPTIONS.map((mode) => <option key={mode} value={mode}>{mode === 'NONE' ? 'Use signal size' : mode}</option>)}</select></label>
                 <label>Amount / percent<input defaultValue={prefill?.allocation?.mode === 'FIXED_AMOUNT' ? prefill.allocation.amount : prefill?.allocation?.percent ?? ''} min="0.001" name="allocationValue" step="any" type="number" /></label>

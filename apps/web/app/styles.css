@@ -800,6 +800,8 @@ button.sm { padding: 6px 10px; font-size: 12px; }
 .symbol-custom { display: flex; gap: 8px; }
 .symbol-custom input { flex: 1; }
 .symbol-picker input[type='hidden'] { display: none; }
+.symbol-error { display: grid; gap: 10px; justify-items: start; padding: 8px; }
+.symbol-error p { color: var(--danger, #ff6b6b); }
 
 /* ============ orders ============ */
 
