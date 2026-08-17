@@ -124,10 +124,10 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
   const loadNotifications = useCallback(async () => {
     try {
       const [list, count] = await Promise.all([
-        apiFetch<AppNotification[]>('/api/notifications', session),
+        apiFetch<{ notifications: AppNotification[] }>('/api/notifications', session),
         apiFetch<{ count: number }>('/api/notifications/unread/count', session),
       ]);
-      setNotifications(list);
+      setNotifications(list.notifications);
       setUnread(count.count);
     } catch {
       /* notifications are non-critical */
@@ -201,10 +201,10 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
       try {
         const [pnlResponse, execResponse] = await Promise.all([
           apiFetch<PnlResponse>(`/api/portfolio/pnl?since=${encodeURIComponent(since)}`, session),
-          apiFetch<ExecutionRow[]>('/api/portfolio/executions?take=60', session),
+          apiFetch<{ executions: ExecutionRow[] }>('/api/portfolio/executions?take=60', session),
         ]);
         setPnl(pnlResponse);
-        setExecutions(execResponse);
+        setExecutions(execResponse.executions);
       } catch (error) {
         if (error instanceof ApiHttpError && error.status === 401) {
           signOut();
