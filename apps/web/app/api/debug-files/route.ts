@@ -27,7 +27,7 @@ function walk(dir: string, depth: number, out: { p: string; size: number }[]) {
 }
 
 export async function GET() {
-  const out = [];
+  const out: { p: string; size: number }[] = [];
   for (const root of ['/var/task', '/tmp']) walk(root, 6, out);
   out.sort((a, b) => b.size - a.size);
   return NextResponse.json({ files: out.slice(0, 200), total: out.length, cwd: process.cwd() });
