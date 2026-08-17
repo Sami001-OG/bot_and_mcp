@@ -44,3 +44,28 @@ for (const pkg of packages) {
 
 console.log('[vercel-build] building next app');
 run(process.execPath, [nextBin, 'build'], { cwd: path.join(root, 'apps', 'web') });
+
+const nftFiles = [];
+function walkNft(d) {
+  for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    const p = path.join(d, e.name);
+    if (e.isDirectory()) walkNft(p);
+    else if (e.name.endsWith('.js.nft.json')) nftFiles.push(p);
+  }
+}
+walkNft(path.join(root, 'apps', 'web', '.next', 'server'));
+const engineHits = [];
+for (const nf of nftFiles) {
+  try {
+    const j = JSON.parse(fs.readFileSync(nf, 'utf8'));
+    for (const f of j.files || []) {
+      if (f.includes('query_engine') || f.includes('generated')) engineHits.push(`${nf.split('.next')[1]}: ${f}`);
+    }
+  } catch { }
+}
+console.log(`[vercel-build] nft.json files checked: ${nftFiles.length}`);
+if (engineHits.length === 0) {
+  console.error('[vercel-build] FATAL: no prisma engine/generated-client entries in any nft.json trace');
+  process.exit(1);
+}
+for (const h of engineHits.slice(0, 20)) console.log('[vercel-build] trace:', h);
