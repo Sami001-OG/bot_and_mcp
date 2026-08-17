@@ -50,6 +50,17 @@ const nextServerDir = path.join(root, 'apps', 'web', '.next', 'server');
 fs.copyFileSync(engineSource, path.join(nextServerDir, engineFile));
 console.log('[vercel-build] engine copied to .next/server for lambda initial layer:', engineFile);
 
+const requiredServerFilesPath = path.join(root, 'apps', 'web', '.next', 'required-server-files.json');
+const rsf = JSON.parse(fs.readFileSync(requiredServerFilesPath, 'utf8'));
+const engineRel = path.join('.next', 'server', engineFile);
+if (!rsf.files.includes(engineRel)) {
+  rsf.files.push(engineRel);
+  fs.writeFileSync(requiredServerFilesPath, JSON.stringify(rsf, null, 2) + '\n');
+  console.log('[vercel-build] engine registered in required-server-files.json files list:', engineRel);
+} else {
+  console.log('[vercel-build] engine already registered in required-server-files.json');
+}
+
 const nftFiles = [];
 function walkNft(d) {
   for (const e of fs.readdirSync(d, { withFileTypes: true })) {
