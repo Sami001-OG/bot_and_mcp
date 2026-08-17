@@ -45,6 +45,11 @@ for (const pkg of packages) {
 console.log('[vercel-build] building next app');
 run(process.execPath, [nextBin, 'build'], { cwd: path.join(root, 'apps', 'web') });
 
+const engineSource = path.join(clientDir, engineFile);
+const nextServerDir = path.join(root, 'apps', 'web', '.next', 'server');
+fs.copyFileSync(engineSource, path.join(nextServerDir, engineFile));
+console.log('[vercel-build] engine copied to .next/server for lambda initial layer:', engineFile);
+
 const nftFiles = [];
 function walkNft(d) {
   for (const e of fs.readdirSync(d, { withFileTypes: true })) {
