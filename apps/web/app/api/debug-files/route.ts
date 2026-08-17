@@ -4,7 +4,7 @@ import path from 'node:path';
 
 export const dynamic = 'force-dynamic';
 
-function walk(dir, depth, out) {
+function walk(dir: string, depth: number, out: { p: string; size: number }[]) {
   if (depth <= 0) return;
   let entries;
   try {
