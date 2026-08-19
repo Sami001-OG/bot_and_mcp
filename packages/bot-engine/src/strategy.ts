@@ -9,10 +9,11 @@ export type SizedOrderRequest = {
   symbol: string;
   side: 'BUY' | 'SELL';
   positionSide: 'LONG' | 'SHORT' | 'BOTH';
-  type: 'MARKET' | 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
+  type: 'MARKET' | 'STOP_MARKET' | 'TAKE_PROFIT_MARKET' | 'TRAILING_STOP';
   quantity: string;
   price?: string;
   stopPrice?: string;
+  callbackRate?: string;
   reduceOnly: boolean;
   postOnly: boolean;
   clientOrderId: string;
@@ -103,6 +104,13 @@ export function buildWebhookOrders(input: WebhookBuildInput): WebhookBuildResult
     if (takeProfits.length > 0) {
       const perTarget = (Number(entryQuantity) / takeProfits.length).toFixed(8);
       for (const [index, target] of takeProfits.entries()) push({ ...base, side: closingSide, positionSide, type: 'TAKE_PROFIT_MARKET', quantity: perTarget, stopPrice: target, reduceOnly: true, clientOrderId: `wh-tp${index}-${keyId}`, idempotencyKey: `${signal.nonce}:tp:${index}` });
+    }
+    const trailing = signal.trailing ?? config.trailing;
+    if (trailing && trailing.enabled !== false && input.price) {
+      push({ ...base, side: closingSide, positionSide, type: 'TRAILING_STOP', quantity: entryQuantity, stopPrice: input.price, callbackRate: String(trailing.callbackPercent), reduceOnly: true, clientOrderId: `wh-tr-${keyId}`, idempotencyKey: `${signal.nonce}:tr` });
+      notes.push(`Trailing stop placed with ${trailing.callbackPercent}% callback`);
+    } else if (trailing && trailing.enabled !== false && !input.price) {
+      skipped.push('Trailing stop skipped: market price unavailable for activation price');
     }
   };
 

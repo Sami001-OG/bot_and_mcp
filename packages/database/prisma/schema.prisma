@@ -117,6 +117,7 @@ model OrderIntent {
   quantity        String
   price           String?
   stopPrice       String?
+  callbackRate    String?
   leverage        Int?
   marginMode      String?
   reduceOnly      Boolean     @default(false)

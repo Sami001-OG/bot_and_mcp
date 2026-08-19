@@ -100,6 +100,18 @@ export const PartialTpsOverrideSchema = z.object({
 });
 export type PartialTpsOverride = z.infer<typeof PartialTpsOverrideSchema>;
 
+export const TrailingOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  callbackPercent: z.number().positive().max(10)
+});
+export type TrailingOverride = z.infer<typeof TrailingOverrideSchema>;
+
+export const TrailingConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  callbackPercent: z.number().positive().max(10)
+});
+export type TrailingConfig = z.infer<typeof TrailingConfigSchema>;
+
 export type ManagementOverrides = { dca?: DcaOverride; breakeven?: BreakevenOverride; partialTps?: PartialTpsOverride };
 
 export const TradingViewSignalSchema = z.object({
@@ -115,6 +127,7 @@ export const TradingViewSignalSchema = z.object({
   dca: DcaOverrideSchema.optional(),
   breakeven: BreakevenOverrideSchema.optional(),
   partialTps: PartialTpsOverrideSchema.optional(),
+  trailing: TrailingOverrideSchema.optional(),
   nonce: z.string().min(12).max(128),
   timestamp: z.string().datetime()
 }).superRefine((value, ctx) => {
@@ -161,7 +174,8 @@ export const WebhookBotConfigSchema = z.object({
   actions: z.array(z.enum(['BUY', 'SELL', 'LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT', 'REVERSE', 'PARTIAL_EXIT'])).optional(),
   dca: DcaConfigSchema.optional(),
   breakeven: BreakevenConfigSchema.optional(),
-  partialTps: PartialTpsConfigSchema.optional()
+  partialTps: PartialTpsConfigSchema.optional(),
+  trailing: TrailingConfigSchema.optional()
 });
 export type WebhookBotConfig = z.infer<typeof WebhookBotConfigSchema>;
 export type WebhookBotAction = WebhookBotConfig['actions'] extends Array<infer T> | undefined ? T : never;

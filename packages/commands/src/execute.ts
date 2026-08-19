@@ -199,6 +199,7 @@ export async function executeOrderNow(orderId: string): Promise<ExecuteResult> {
         quantity,
         ...(snappedPrice == null ? {} : { price: snappedPrice }),
         ...(snappedStop == null ? {} : { stopPrice: snappedStop }),
+        ...(order.callbackRate ? { callbackRate: order.callbackRate } : {}),
         reduceOnly: order.reduceOnly,
         postOnly: order.postOnly,
         clientOrderId: order.clientOrderId,
@@ -373,6 +374,7 @@ export type PersistedOrderLike = {
   quantity: string;
   price?: string;
   stopPrice?: string;
+  callbackRate?: string;
   reduceOnly: boolean;
   postOnly: boolean;
   clientOrderId: string;
@@ -405,6 +407,7 @@ export async function persistOrder(order: PersistedOrderLike, options: PersistOr
         quantity: order.quantity,
         ...(order.price ? { price: order.price } : {}),
         ...(order.stopPrice ? { stopPrice: order.stopPrice } : {}),
+        ...(order.callbackRate ? { callbackRate: order.callbackRate } : {}),
         ...(options.leverage !== undefined ? { leverage: options.leverage } : {}),
         ...(options.marginMode ? { marginMode: options.marginMode } : {}),
         ...(options.allocation ? { allocation: options.allocation as unknown as Prisma.InputJsonValue } : {}),

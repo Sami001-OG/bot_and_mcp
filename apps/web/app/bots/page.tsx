@@ -18,6 +18,7 @@ type BotConfig = {
   dca?: { enabled: boolean; triggerDropPercent: number; stepDropPercent?: number; amountMode: 'FIXED' | 'PERCENT_EQUITY'; amount: number; maxSteps: number };
   breakeven?: { enabled: boolean; moveAtProfitPercent: number; safeProfitPercent?: number };
   partialTps?: { enabled: boolean; levels: Array<{ pricePercent: number; closePercent: number }> };
+  trailing?: { enabled: boolean; callbackPercent: number };
 };
 
 type Market = { symbol: string; base: string; quote: string; type: string; active: boolean };
@@ -88,6 +89,7 @@ function formatConfig(config: BotConfig): string {
   if (config.dca?.enabled) parts.push(`DCA ${config.dca.triggerDropPercent}% x${config.dca.maxSteps}`);
   if (config.breakeven?.enabled) parts.push(`BE @+${config.breakeven.moveAtProfitPercent}%`);
   if (config.partialTps?.enabled) parts.push(`TP ${config.partialTps.levels.map((level) => `${level.pricePercent}:${level.closePercent}`).join('/')}`);
+  if (config.trailing?.enabled) parts.push(`Trail ${config.trailing.callbackPercent}%`);
   return parts.join(' · ');
 }
 
@@ -313,6 +315,9 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
         .map(([priceRaw, closeRaw]) => ({ pricePercent: Number(priceRaw), closePercent: Number(closeRaw) }))
         .filter((level) => Number.isFinite(level.pricePercent) && level.pricePercent > 0 && Number.isFinite(level.closePercent) && level.closePercent > 0);
       if (levels.length > 0) config.partialTps = { enabled: true, levels };
+    }
+    if (form.get('trailingEnabled') === 'on') {
+      config.trailing = { enabled: true, callbackPercent: Number(form.get('trailingCallbackPercent')) };
     }
 
     try {
@@ -634,6 +639,13 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
                 <label className="checkbox"><input defaultChecked={prefill?.partialTps?.enabled ?? false} name="partialTpsEnabled" type="checkbox" /> Claim a percentage of the position at each TP level</label>
                 <label>TP levels (price% : close%)<input defaultValue={prefill?.partialTps?.levels.map((level) => `${level.pricePercent}:${level.closePercent}`).join(', ') ?? ''} name="partialTpLevels" placeholder="2:30, 5:30, 10:40" type="text" /></label>
                 <p className="muted small">Comma separated, e.g. <code>2:30, 5:40, 10:30</code> closes 30% at +2%, 40% at +5%, 30% at +10%. Levels must sum to 100% or less.</p>
+              </fieldset>
+
+              <fieldset className="action-field">
+                <legend>Trailing stop</legend>
+                <label className="checkbox"><input defaultChecked={prefill?.trailing?.enabled ?? false} name="trailingEnabled" type="checkbox" /> Attach a trailing stop to every entry</label>
+                <label>Callback %<input defaultValue={prefill?.trailing?.callbackPercent ?? 1.5} min="0.01" name="trailingCallbackPercent" step="any" type="number" /></label>
+                <p className="muted small">A reduce-only trailing stop activates at the entry price. Once price moves {prefill?.trailing?.callbackPercent ?? 1.5}% past the highest point, the stop follows the price. Can be combined with a fixed stop loss.</p>
               </fieldset>
               <div className="modal-actions">
                 <button className="secondary" onClick={() => setCreateOpen(false)} type="button">Cancel</button>

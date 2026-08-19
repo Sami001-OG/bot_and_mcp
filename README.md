@@ -99,6 +99,7 @@ Go to **Bots** (`/bots`):
   - **Leverage** — 1–200 (futures).
   - **Stop loss price** — optional fixed SL price; orders will attach a reduce-only SL bracket.
   - **Take profits** — optional comma-separated prices, e.g. `100000, 110000`; each becomes a reduce-only TP bracket order.
+  - **Trailing stop** — optional `callbackPercent` (0.01–10, e.g. `1.5` = 1.5%). Every entry gets a reduce-only trailing-stop order activated at the entry price: once price moves `callbackPercent`% past the best (highest for longs / lowest for shorts) price, the stop follows it, locking in profit on pullbacks. It can be combined with a fixed SL (disaster stop) — the fixed SL stays in place and the trailing stop rides above it. Trailing works for both futures and spot entries.
   - **Require stop loss before entering** — when checked, signals without a `stop_loss` are skipped.
   - **Allowed signal actions** — checkbox allowlist: `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`. Signals with other actions are ignored.
   - **Position-management capabilities** (evaluated on every bot run, and on demand via the MCP `manageBot` tool, or triggered by the webhook `MANAGE` action):
@@ -144,8 +145,12 @@ The TradingView alert message body must be JSON with these fields:
 | `dca` | object | no | **ephemeral** DCA override for this run only (see below) |
 | `breakeven` | object | no | **ephemeral** breakeven override for this run only |
 | `partialTps` | object | no | **ephemeral** partial-TP override for this run only |
+| `trailing` | object | no | **ephemeral** trailing-stop override for this run's entry: `{ callbackPercent }` (0.01–10). Like `stop_loss`/`take_profit`, it applies to the entry bracket, not the management pass |
 
-Actions `SET_LEVERAGE` and `MOVE_STOP` are schema-valid but not exposed as bot action options — bots ignore them unless configured.
+Actions `SET_LEVERAGE` and `MOVE_STOP` are schema-valid but not exposed as bot action options — bots ignore them unless configured. (To move a stop loss on an existing position, use the MCP `manageBot` tool or the position-management features above.)
+
+> [!NOTE]
+> `trailing` is **not** a management override — it belongs to the entry bracket (`stop_loss` / `take_profit` family) and only takes effect on the run's entry orders. The management pass (DCA / breakeven / partial TP) does not add or move trailing stops.
 
 #### Ephemeral management overrides (DCA / breakeven / partial TP)
 
@@ -313,6 +318,45 @@ Force the DCA/breakeven/partial-TP engine to evaluate all open positions now —
   "stop_loss": "91000",
   "timestamp": "2026-08-19T10:00:00.000Z",
   "nonce": "i8l9m0n1o2p3"
+}
+```
+
+**9. Entry with a trailing stop (ephemeral — overrides the bot's saved trailing config for this run)**
+
+`trailing` attaches a reduce-only trailing-stop order to this run's entry. Here: 1.5% callback. The stop activates at the entry price and follows the market once price moves 1.5% past the best price. If the bot also has a saved fixed SL, both exist (trailing rides above the fixed stop):
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "SOL/USDT:USDT",
+  "action": "LONG",
+  "size": "0.5",
+  "leverage": 5,
+  "trailing": { "callbackPercent": 1.5 },
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "k0m1n2o3p4q5"
+}
+```
+
+**10. Full entry bracket: fixed SL + multi-TP + trailing + DCA + breakeven + partial-TP — everything in one signal**
+
+The complete toolset on a single alert: enter 0.1 ETH with a fixed stop at 2200, two take-profit bracket orders (2400, 2600), a 2% trailing stop riding above, and ephemeral management config for the run (DCA after a 4% drop, breakeven move at +1.5%, partial claims 25% at +3% / 50% at +8%):
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "ETH/USDT:USDT",
+  "action": "LONG",
+  "size": "0.1",
+  "leverage": 10,
+  "stop_loss": "2200",
+  "take_profit": ["2400", "2600"],
+  "trailing": { "callbackPercent": 2 },
+  "dca": { "triggerDropPercent": 4, "amountMode": "FIXED", "amount": 50, "maxSteps": 3 },
+  "breakeven": { "moveAtProfitPercent": 1.5, "safeProfitPercent": 0.2 },
+  "partialTps": { "levels": [ { "pricePercent": 3, "closePercent": 25 }, { "pricePercent": 8, "closePercent": 50 } ] },
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "l1n2o3p4q5r6"
 }
 ```
 

@@ -132,4 +132,34 @@ describe('buildWebhookOrders', () => {
     expect(result.orders).toHaveLength(0);
     expect(result.skipped[0]).toContain('not supported');
   });
+
+  it('attaches a trailing stop bracket from the signal override', () => {
+    const result = buildWebhookOrders({ signal: signal({ trailing: { callbackPercent: 1.5 } }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    expect(result.skipped).toEqual([]);
+    const trailing = result.orders.find((order) => order.type === 'TRAILING_STOP');
+    if (!trailing) throw new Error('expected trailing stop order');
+    expect(trailing).toMatchObject({ side: 'SELL', positionSide: 'LONG', stopPrice: '95000', callbackRate: '1.5', reduceOnly: true, idempotencyKey: 'n-123456789012:tr' });
+  });
+
+  it('attaches a trailing stop from the saved bot config', () => {
+    const result = buildWebhookOrders({ signal: signal(), config: config({ trailing: { enabled: true, callbackPercent: 2 } }), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    const trailing = result.orders.find((order) => order.type === 'TRAILING_STOP');
+    if (!trailing) throw new Error('expected trailing stop order');
+    expect(trailing).toMatchObject({ callbackRate: '2' });
+    expect(result.orders).toHaveLength(2);
+  });
+
+  it('keeps a fixed stop loss alongside the trailing stop', () => {
+    const result = buildWebhookOrders({ signal: signal({ trailing: { callbackPercent: 1.5 } }), config: config({ stopLoss: '90000' }), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    const types = result.orders.map((order) => order.type);
+    expect(types).toContain('STOP_MARKET');
+    expect(types).toContain('TRAILING_STOP');
+  });
+
+  it('skips the trailing stop when the market price is unavailable', () => {
+    const result = buildWebhookOrders({ signal: signal({ trailing: { callbackPercent: 1.5 } }), config: config(), account, equity: '1000', maxEquity: '1000' });
+    expect(result.orders).toHaveLength(1);
+    expect(result.orders[0]).toMatchObject({ type: 'MARKET' });
+    expect(result.skipped[0]).toContain('Trailing stop skipped');
+  });
 });

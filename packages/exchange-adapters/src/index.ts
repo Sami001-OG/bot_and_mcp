@@ -215,13 +215,14 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
           category: 'linear',
           symbol: exchangeSymbol,
           side: order.side.toLowerCase() === 'buy' ? 'Buy' : 'Sell',
-          orderType: 'Market',
+          orderType: order.type === 'TRAILING_STOP' ? 'TrailingStop' : 'Market',
           qty: String(order.quantity),
           timeInForce: order.postOnly ? 'PostOnly' : 'GTC',
           reduceOnly,
           triggerPrice: String(order.stopPrice),
           triggerDirection,
           triggerBy: 'LastPrice',
+          ...(order.type === 'TRAILING_STOP' && order.callbackRate ? { callbackRate: order.callbackRate } : {}),
           ...(hedgedMode ? { positionIdx: positionSide === 'SHORT' ? 2 : 1 } : {}),
           ...(order.clientOrderId ? { orderLinkId: order.clientOrderId } : {})
         };
