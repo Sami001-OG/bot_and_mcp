@@ -77,7 +77,7 @@ Go to **Exchange APIs** (`/accounts`):
 3. **Set primary** — switches the default account for anything not bound to a specific account.
 4. **Delete** — returns 409 `ACCOUNT_IN_USE` if bots still reference the account; stop/delete those bots first.
 
-Trading API requirements on the Bybit side: enable the API key, and for futures ensure the account is in the appropriate position mode (one-way or hedge — the adapter handles both; `LONG`/`SHORT` map to hedge-mode positionIdx 1/2).
+Trading API requirements on the Bybit side: enable the API key, and for futures the adapter auto-detects the account's position mode (one-way or hedge — it omits `positionIdx` for one-way accounts and uses hedge-mode `positionIdx 1/2` for hedged accounts, so no manual mode setting is needed).
 
 ## 3. Bots
 
@@ -589,7 +589,7 @@ All packages are bundled into the `.next` build — after editing a package you 
 - **Position management** (`manageBotPositions`, `packages/commands/src/manage.ts`): runs automatically at the end of every bot run and on demand via the MCP `manageBot` tool. State (DCA step count, breakeven-applied flag, claimed/placed TP levels) persists per bot in `BotState`, so steps don't repeat across runs. Management orders use `btdc-`/`btbr-`/`bttp-`/`btcl-` clientOrderId prefixes and `source.kind: bot-manage`.
 - **Clock handling**: this VM drifts; the Bybit adapter always sets `recvWindow: 30000` + `adjustForTimeDifference: true` — requests fail with 10002 otherwise. Never disable.
 - **Risk pipeline** (`evaluateOrder`): trading enablement → daily-loss breaker → margin vs. equity → min-notional ($10 futures / $5 spot floor) → leverage bounds → size alignment to exchange precision (`alignAmount`/`alignPrice`, `PRECISION_REJECTED` below `amountMin`).
-- **Futures details**: `LONG`/`SHORT` map to hedged-mode `positionIdx` 1/2; SL/TP brackets are reduce-only conditional trigger orders (`orderType: Market`, `triggerPrice`, `triggerDirection`, `triggerBy: LastPrice`); only **ISOLATED** margin is accepted.
+- **Futures details**: the adapter auto-detects each account's position mode — one-way accounts place orders **without** `positionIdx` (Bybit rejects hedge `positionIdx 1/2` with `10001` on one-way accounts), hedged accounts use `positionIdx 1/2`; SL/TP brackets are reduce-only conditional trigger orders (`orderType: Market`, `triggerPrice`, `triggerDirection`, `triggerBy: LastPrice`); only **ISOLATED** margin is accepted.
 
 ## Local development
 

@@ -43,17 +43,21 @@
 - **Unit tests**: commands 11 (added prefix/dcaStepDue/breakevenTarget/TP-sum-schema/config-compat tests), security 4 — all green.
 - **Deployed to Vercel prod** (`https://web-blue-delta-17.vercel.app`, aliased; build `web-h6fwi1f28-...`): health 200, MCP init 200 with 23 tools. NOTE: user reset the Vercel envs — prod `MCP_PASSWORD` is now **`2091006293`** (differs from local `.env`); env changes require a fresh `vercel deploy --prod` to take effect. Local `.env` unchanged.
 - MongoDB: Atlas `BotState`/`MarketCache` pushed; local mongod 7.0.14 restarted (died earlier) + db pushed.
+- **Webhook management control** (external app drives the webhook): `TradingViewSignalSchema` accepts ephemeral `dca`/`breakeven`/`partialTps` overrides (replace saved config for that run; presence implies enabled), a `MANAGE` action (management-only run, no orders, `size` forbidden — `size` optional with superRefine), `mergeManagementOverrides` + `manageBotPositions(botId, overrides?)`; delivery `bots[]` includes `status` + `managed`. README has 8 signed-payload examples.
+- **Testnet accounts**: `ExchangeAccount.testnet` (Boolean) in Prisma; ccxt `setSandboxMode(true)` in `connect()`; `AccountConfig.testnet`, `createExchangeAccount(testnet?)`, `toPublic.testnet`; accounts UI Testnet checkbox + TESTNET badge. UI-only (no MCP createAccount).
+- **Cron manage pass** (cron-job.org-style 1-min ping): `runAllBotManagement()` in manage.ts iterates ACTIVE WEBHOOK bots (per-bot `manageBotPositions`, errors isolated); `/api/cron` runs it in `Promise.all` (CRON_SECRET auth). Smoke: 401 without secret, 200 with.
+- **Bybit position-mode fix** (`9cc046a`, the one that unblocks testnet orders): Bybit rejects futures orders carrying `positionIdx 1/2` with `10001 "position idx not match position mode"` when the account is One-Way (default). `CcxtExchangeAdapter.placeOrder` now auto-detects mode per credentials (`fetchPositions` probe, 5-min module cache), omits `positionIdx`/`hedged` for one-way, keeps hedge params when hedged, and retries once after a `position idx` mismatch. Verified live on testnet: hedge entry/close, one-way entry, conditional TAKE_PROFIT_MARKET all place correctly; full suite 89 green; deployed (build `web-hvgx983di-...`) + prod health 200, MCP init 200, 23 tools.
 - Earlier session (superseded README-era): single-app refactor, per-bot exchange APIs, hkg1 lambda pin, `5436dbe` Prisma-engine-on-Vercel fix — all still live.
 
 ### Active
-- (none) — DB clean (smoke self-cleans). All work verified: local build + smoke exit 0 + prod MCP 200/23 tools.
+- User retries testnet order placement through the app (fix is live in prod). Testnet account has 10,001 USDT derivatives balance (verified); account mode is **One-Way**; my probe left BTC in one-way mode and no open positions (a 0.001 BTC probe long was opened then closed during verification).
 ### Blocked
 - None.
 
 ## Next Move
-1. **Testnet flow (user)**: add `TESTNET_API_KEY`/`TESTNET_SECRET_KEY` to `.env` for the smoke testnet case; create keys at `testnet.bybit.com` (USDT-M), add a testnet account in the UI, bind a bot, set up cron-job.org (POST `https://web-blue-delta-17.vercel.app/api/cron`, header `x-cron-secret: <CRON_SECRET>`, every 1 minute — free tier allows it), watch `BotRun.managed` accumulate.
-2. Optional: sync local `.env` `MCP_PASSWORD` to match prod (`2091006293`), or vice versa; re-verify after any env rotation with a redeploy.
-3. Optional cleanup: `scripts/` prune pass; README already refreshed for this feature set.
+1. **Confirm testnet order flow (user)**: retry order placement via the bot/webhook/UI on `https://web-blue-delta-17.vercel.app` — previously-rejected intents stay REJECTED, so place a fresh order. Watch `BotRun.managed` accumulate every minute from cron-job.org; open a position and let DCA/breakeven/partial-TP react.
+2. Note: the same one-way fix applies to **mainnet** accounts (Bybit default is one-way there too) — real-account orders will now place instead of `10001`.
+3. Optional: sync local `.env` `MCP_PASSWORD` to match prod (`2091006293`), or vice versa; re-verify after any env rotation with a redeploy.
 4. On fresh `npm install`: re-apply the local next-build workarounds (nft home-glob patch + `eperm-skip.cjs`) — `vercel-build.mjs` (cloud build) needs NO patching and is self-contained.
 5. When the Atlas cluster changes (new user/password/hosts), re-derive the direct URI from `nslookup -type=SRV _mongodb._tcp.cluster0.amjzy1x.mongodb.net` + TXT record, update `.env`, run `prisma db push`, re-run the smoke.
 
@@ -65,7 +69,7 @@
 - `packages/commands/src/exchange-accounts.ts`, `account.ts`, `bots.ts`, `execute.ts`, `orders.ts`, `portfolio.ts`, `bot-trade.ts`, `markets.ts`, `manage.ts` — account-bound domain logic; `manage.ts` = DCA/breakeven/partial-TP engine (`manageBotPositions` + pure helpers `managePrefix`/`dcaStepDue`/`breakevenTarget`).
 - `packages/commands/src/manage.ts` — position-management engine, core of the DCA/breakeven/partial-TP feature; state in `BotState`, order prefixes `btdc-/btbr-/bttp-/btcl-`, `source.kind: bot-manage`.
 - `packages/security/src/index.ts` — `encryptSecret`/`decryptSecret` (AES-256-GCM, ENCRYPTION_KEY hex or base64-32), `constantTimeEqual`, `hashToken`.
-- `packages/exchange-adapters/src/index.ts` — bybit `recvWindow: 30000` + `adjustForTimeDifference: true`.
+- `packages/exchange-adapters/src/index.ts` — bybit `recvWindow: 30000` + `adjustForTimeDifference: true`; **position-mode auto-detect** (one-way vs hedge) per credentials with `positionIdx` mismatch auto-retry.
 - `packages/database/prisma/schema.prisma` — ExchangeAccount, Bot(+exchangeAccountId), OrderIntent(+exchangeAccountId), BotVersion/BotRun/WebhookEndpoint/WebhookDelivery/Notification, Settings, Position, Execution, BotState (botId @unique, Json), MarketCache.
 - `apps/web/app/api/mcp/tools.ts` — 23 global MCP tools (`manageBot` added), account-aware (awaited `getAccountConfig`); `botToolSpecs`/`runBotTool` inject botId for per-bot servers.
 - `apps/web/app/api/mcp/bots/[botId]/route.ts` — per-bot MCP server (Bearer bot password, `CommandError` mapping); `apps/web/app/api/mcp/server.ts` — shared handler.
