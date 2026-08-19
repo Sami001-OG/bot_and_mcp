@@ -5,7 +5,7 @@ export async function createWebhookEndpoint(input: { name: string }) {
   const { name } = input;
   const signingSecret = randomUUID();
   const endpoint = await prisma.webhookEndpoint.create({ data: { name, signingSecret } });
-  return { id: endpoint.id, name: endpoint.name, signingSecret, url: `POST /api/webhooks/tradingview/${endpoint.id}` };
+  return { id: endpoint.id, name: endpoint.name, signingSecret, url: `/api/webhooks/tradingview/${endpoint.id}` };
 }
 
 export async function listWebhookEndpoints() {

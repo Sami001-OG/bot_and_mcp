@@ -43,8 +43,8 @@ export async function createBot(input: CreateBotInput) {
   await prisma.botVersion.create({ data: { botId: bot.id, version: 1, config, checksum } });
   return {
     bot,
-    webhook: { id: endpoint.id, url: `POST /api/webhooks/tradingview/${endpoint.id}`, signingSecret },
-    mcp: { url: `POST /api/mcp/bots/${bot.id}`, password: signingSecret },
+    webhook: { id: endpoint.id, url: `/api/webhooks/tradingview/${endpoint.id}`, signingSecret },
+    mcp: { url: `/api/mcp/bots/${bot.id}`, password: signingSecret },
   };
 }
 
