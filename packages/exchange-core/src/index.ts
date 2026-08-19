@@ -38,6 +38,7 @@ export interface ExchangeAdapter {
   getOrder(orderId: string, symbol: string): Promise<ExchangeOrder>;
   findOrderByClientOrderId(clientOrderId: string, symbol: string): Promise<ExchangeOrder | null>;
   getPrice(symbol: string): Promise<string>;
+  resolveMarketSymbol(symbol: string): string;
   placeOrder(order: OrderRequest): Promise<ExchangeOrder>;
   cancelOrder(orderId: string, symbol: string): Promise<ExchangeOrder>;
   modifyOrder(orderId: string, order: OrderRequest): Promise<ExchangeOrder>;

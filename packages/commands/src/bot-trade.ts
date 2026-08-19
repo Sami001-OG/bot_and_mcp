@@ -99,7 +99,7 @@ export async function closePositionThroughBot(botId: string, symbol: string): Pr
   let position: { symbol: string; side: 'LONG' | 'SHORT'; quantity: string; entryPrice: string } | undefined;
   const session = await connectToAccount(ctx.account.id);
   try {
-    const found = (await session.adapter.getPositions()).find((entry) => entry.symbol.toUpperCase() === normalized);
+    const found = (await session.adapter.getPositions()).find((entry) => entry.symbol.toUpperCase() === normalized.split(':')[0]);
     if (found) position = { symbol: found.symbol, side: found.side as 'LONG' | 'SHORT', quantity: String(found.quantity), entryPrice: String(found.entryPrice) };
   } finally {
     await session.adapter.disconnect().catch(() => undefined);

@@ -159,7 +159,7 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
       const quote = (signal.symbol.split('/')[1] ?? 'USDT').split(':')[0] ?? 'USDT';
       const balance = (await session.adapter.getBalance().catch(() => [])).find((entry) => entry.asset.toUpperCase() === quote.toUpperCase());
       if (balance && Number(balance.total) > 0) equity = balance.total;
-      const position = (await session.adapter.getPositions().catch(() => [])).find((entry) => entry.symbol.toUpperCase() === signal.symbol.toUpperCase());
+      const position = (await session.adapter.getPositions().catch(() => [])).find((entry) => entry.symbol.toUpperCase() === (signal.symbol.split(':')[0] ?? signal.symbol).toUpperCase());
       if (position && position.side !== 'BOTH') { currentPositionSide = position.side; positionQuantity = Number(position.quantity); }
       precision = await marketPrecisionOf(session.adapter, signal.symbol).catch(() => null);
     } finally { await session.adapter.disconnect().catch(() => undefined); }

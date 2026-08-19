@@ -196,8 +196,8 @@ export async function executeOrderNow(orderId: string): Promise<ExecuteResult> {
         positionSide: order.positionSide,
         type: order.orderType,
         quantity,
-        price: snappedPrice,
-        stopPrice: snappedStop,
+        ...(snappedPrice == null ? {} : { price: snappedPrice }),
+        ...(snappedStop == null ? {} : { stopPrice: snappedStop }),
         reduceOnly: order.reduceOnly,
         postOnly: order.postOnly,
         clientOrderId: order.clientOrderId,
@@ -211,8 +211,8 @@ export async function executeOrderNow(orderId: string): Promise<ExecuteResult> {
       }
       let resolved: ExchangeOrder = exchangeOrder;
       if (!['FILLED', 'PARTIALLY_FILLED', 'REJECTED', 'CANCELED'].includes(exchangeOrder.status)) {
-        for (let poll = 0; poll < 6; poll++) {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+        for (let poll = 0; poll < 8; poll++) {
+          if (poll > 0) await new Promise((resolve) => setTimeout(resolve, 250));
           try { resolved = await adapter.getOrder(exchangeOrder.id, order.symbol); } catch { break; }
           if (resolved.status === 'FILLED' || resolved.status === 'PARTIALLY_FILLED' || Number(resolved.filledQuantity ?? 0) > 0) break;
         }
@@ -225,12 +225,13 @@ export async function executeOrderNow(orderId: string): Promise<ExecuteResult> {
           throw new ExchangeError('DB_WRITE_FAILED', `Failed to record execution: ${error instanceof Error ? error.message : String(error)}`, true);
         }
       }
+      const finalState = resolved.status === 'FILLED' ? 'FILLED' : resolved.status === 'PARTIALLY_FILLED' || (resolved.status === 'NEW' && recordedFilled > 0) ? 'PARTIALLY_FILLED' : resolved.status === 'REJECTED' ? 'REJECTED' : resolved.status === 'CANCELED' ? 'CANCELED' : 'ACKNOWLEDGED';
       try {
-        await setState(order.id, resolved.status === 'FILLED' ? 'FILLED' : resolved.status === 'PARTIALLY_FILLED' || (resolved.status === 'NEW' && recordedFilled > 0) ? 'PARTIALLY_FILLED' : resolved.status === 'REJECTED' ? 'REJECTED' : resolved.status === 'CANCELED' ? 'CANCELED' : 'ACKNOWLEDGED', resolved.status === 'REJECTED' ? resolved.rawStatus : undefined);
+        await setState(order.id, finalState, resolved.status === 'REJECTED' ? resolved.rawStatus : undefined);
       } catch (error) {
         throw new ExchangeError('DB_WRITE_FAILED', `Failed to persist final state: ${error instanceof Error ? error.message : String(error)}`, true);
       }
-      return { orderId, state: order.state, exchangeOrderId: exchangeOrder.id, filled: recordedFilled };
+      return { orderId, state: finalState, exchangeOrderId: exchangeOrder.id, filled: recordedFilled };
     } catch (error) {
       const exchangeError = error instanceof ExchangeError ? error : new ExchangeError('INTERNAL', error instanceof Error ? error.message : String(error), false);
       const canRetry = exchangeError.retryable && attempt < MAX_EXECUTE_ATTEMPTS - 1;

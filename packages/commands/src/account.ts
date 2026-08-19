@@ -67,7 +67,8 @@ export async function marketPrecisionOf(adapter: ExchangeAdapter, symbol: string
   let precision: MarketPrecision | null = null;
   try {
     const { markets } = await fetchMarketsCached().catch(() => ({ markets: [] as MarketInfo[] }));
-    const match = markets.find((market) => market.symbol.toUpperCase() === symbol.toUpperCase());
+    const resolved = symbol.includes(':') ? symbol : adapter.resolveMarketSymbol(symbol);
+    const match = markets.find((market) => market.symbol.toUpperCase() === resolved.toUpperCase());
     if (match) precision = { ...(match.amountStep !== undefined ? { amountStep: match.amountStep } : {}), ...(match.amountMin !== undefined ? { amountMin: match.amountMin } : {}), ...(match.priceStep !== undefined ? { priceStep: match.priceStep } : {}), ...(match.priceMin !== undefined ? { priceMin: match.priceMin } : {}) };
   } catch { /* precision is advisory; order flow continues unaligned */ }
   marketPrecisionCache.set(key, { expiresAt: Date.now() + MARKET_PRECISION_TTL_MS, precision });

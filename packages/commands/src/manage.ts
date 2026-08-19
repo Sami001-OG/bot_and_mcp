@@ -161,7 +161,7 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
     const openByClientOrderId = new Set(openOrders.map((order) => order.clientOrderId).filter(Boolean));
 
     for (const position of positions) {
-      if (!ctx.config.symbols.some((entry) => entry === '*' || entry.toUpperCase() === position.symbol.toUpperCase())) continue;
+      if (!ctx.config.symbols.some((entry) => entry === '*' || entry.toUpperCase().split(':')[0] === position.symbol.toUpperCase())) continue;
       const side = position.side;
       if (side !== 'LONG' && side !== 'SHORT') continue;
       const quantity = Number(position.quantity);
