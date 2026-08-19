@@ -17,6 +17,11 @@ const ccxtNames: Record<ExchangeId, keyof typeof ccxt> = {
   binance: 'binance', bybit: 'bybit', okx: 'okx', kucoin: 'kucoin', kraken: 'kraken', coinbase: 'coinbase', mexc: 'mexc', hyperliquid: 'hyperliquid'
 };
 
+const positionModeCache = new Map<string, { mode: 'one-way' | 'hedged'; at: number }>();
+const POSITION_MODE_TTL_MS = 5 * 60 * 1000;
+function positionModeKey(testnet: boolean | undefined, apiKey: string | undefined): string { return `${testnet ? 'testnet' : 'mainnet'}:${apiKey ?? ''}`; }
+function isPositionIdxMismatch(error: unknown): boolean { return error instanceof Error && /position idx/i.test(error.message); }
+
 export function matchOrderByClientOrderId(orders: ExchangeOrder[], clientOrderId: string): ExchangeOrder | null {
   const target = clientOrderId.trim().toLowerCase();
   return orders.find((order) => order.clientOrderId.trim().toLowerCase() === target || order.id.trim().toLowerCase() === target) ?? null;
@@ -54,10 +59,12 @@ export function bareSymbol(symbol: string): string { return symbol.split(':')[0]
 export class CcxtExchangeAdapter implements ExchangeAdapter {
   readonly capabilities: AdapterCapabilities;
   private client?: Exchange;
+  private credentialsKey?: string;
   constructor(public readonly id: ExchangeId, private readonly marketType: MarketType) { this.capabilities = capabilities[id]; }
 
   async connect(credentials: ExchangeCredentials): Promise<ExchangeConnection> {
     const Constructor = ccxt[ccxtNames[this.id]] as unknown as new (config: Record<string, unknown>) => Exchange;
+    this.credentialsKey = positionModeKey(credentials.testnet, credentials.apiKey);
     const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
     this.client = new Constructor({ apiKey: credentials.apiKey, secret: credentials.secret, password: credentials.passphrase, walletAddress: credentials.walletAddress, privateKey: credentials.privateKey, enableRateLimit: true, options: { defaultType: this.defaultType(), fetchOpenOrders: { warnWithoutSymbol: false }, ...(this.id === 'bybit' ? { recvWindow: 60000, adjustForTimeDifference: true } : {}) }, ...(proxy ? { httpsProxy: proxy } : {}) });
     if (credentials.testnet) this.client.setSandboxMode(true);
@@ -179,15 +186,24 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
     if (order.postOnly) params.postOnly = true;
     if (order.timeInForce) params.timeInForce = order.timeInForce;
     if (this.id === 'bybit' && this.marketType !== 'SPOT') {
-      if (order.positionSide === 'LONG' || order.positionSide === 'SHORT') {
-        params.positionIdx = order.positionSide === 'LONG' ? 1 : 2;
-        params.hedged = true;
-      } else if (order.reduceOnly) {
-        params.positionIdx = order.side.toLowerCase() === 'sell' ? 1 : 2;
-      }
+      await this.applyBybitPositionMode(order, params);
     } else if (order.positionSide === 'LONG' || order.positionSide === 'SHORT') {
       params.positionSide = order.positionSide;
     }
+    try { return await this.executePlacement(order, params); }
+    catch (error) {
+      if (this.id === 'bybit' && isPositionIdxMismatch(error) && this.credentialsKey) {
+        positionModeCache.delete(this.credentialsKey);
+        delete params.positionIdx;
+        delete params.hedged;
+        await this.applyBybitPositionMode(order, params);
+        try { return await this.executePlacement(order, params); }
+        catch (error2) { throw this.normalize(error2); }
+      }
+      throw this.normalize(error);
+    }
+  }
+  private async executePlacement(order: OrderRequest, params: Record<string, unknown>): Promise<ExchangeOrder> {
     if (order.stopPrice) {
       if (this.id === 'bybit' && this.marketType !== 'SPOT') {
         const client = this.requireClient() as unknown as { privatePostV5OrderCreate: (request: Record<string, unknown>) => Promise<{ result?: { orderId?: string; orderLinkId?: string } }> };
@@ -197,7 +213,8 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
         const positionSide = order.positionSide ?? (order.side.toLowerCase() === 'buy' ? 'LONG' : 'SHORT');
         const isTakeProfit = order.type === 'TAKE_PROFIT' || order.type === 'TAKE_PROFIT_MARKET';
         const triggerDirection = order.side.toLowerCase() === 'buy' ? (isTakeProfit ? 2 : 1) : (isTakeProfit ? 1 : 2);
-        const triggerRequest = {
+        const hedgedMode = (await this.bybitPositionMode(order.symbol)) === 'hedged';
+        const triggerRequest: Record<string, unknown> = {
           category: 'linear',
           symbol: exchangeSymbol,
           side: order.side.toLowerCase() === 'buy' ? 'Buy' : 'Sell',
@@ -208,7 +225,7 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
           triggerPrice: String(order.stopPrice),
           triggerDirection,
           triggerBy: 'LastPrice',
-          positionIdx: positionSide === 'SHORT' ? 2 : 1,
+          ...(hedgedMode ? { positionIdx: positionSide === 'SHORT' ? 2 : 1 } : {}),
           ...(order.clientOrderId ? { orderLinkId: order.clientOrderId } : {})
         };
         const response = await client.privatePostV5OrderCreate(triggerRequest);
@@ -225,14 +242,36 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
           rawStatus: result.orderId ? 'open' : 'rejected',
           updatedAt: new Date().toISOString()
         };
-        if (!result.orderId) throw this.normalize(new Error(`Bybit conditional order rejected: ${JSON.stringify(response)}`));
+        if (!result.orderId) throw new Error(`Bybit conditional order rejected: ${JSON.stringify(response)}`);
         return created;
       }
       params.triggerPrice = order.stopPrice;
       if (this.id === 'bybit') params.triggerDirection = order.side.toLowerCase() === 'buy' ? 'ascending' : 'descending';
     }
     if (order.callbackRate) params.callbackRate = order.callbackRate;
-    try { return this.mapOrder(await this.requireClient().createOrder(this.marketSymbol(order.symbol), this.mapType(order.type), order.side.toLowerCase(), Number(order.quantity), order.price ? Number(order.price) : undefined, params)); } catch (error) { throw this.normalize(error); }
+    return this.mapOrder(await this.requireClient().createOrder(this.marketSymbol(order.symbol), this.mapType(order.type), order.side.toLowerCase(), Number(order.quantity), order.price ? Number(order.price) : undefined, params));
+  }
+  private async applyBybitPositionMode(order: OrderRequest, params: Record<string, unknown>): Promise<void> {
+    if ((await this.bybitPositionMode(order.symbol)) !== 'hedged') return;
+    if (order.positionSide === 'LONG' || order.positionSide === 'SHORT') {
+      params.positionIdx = order.positionSide === 'LONG' ? 1 : 2;
+      params.hedged = true;
+    } else if (order.reduceOnly) {
+      params.positionIdx = order.side.toLowerCase() === 'sell' ? 1 : 2;
+    }
+  }
+  private async bybitPositionMode(symbol: string): Promise<'one-way' | 'hedged'> {
+    if (this.id !== 'bybit' || this.marketType === 'SPOT' || !this.credentialsKey) return 'one-way';
+    const cached = positionModeCache.get(this.credentialsKey);
+    if (cached && Date.now() - cached.at < POSITION_MODE_TTL_MS) return cached.mode;
+    let mode: 'one-way' | 'hedged' = 'one-way';
+    try {
+      const positions = await this.requireClient().fetchPositions([this.marketSymbol(symbol)]);
+      const indexes = positions.map((p) => Number((p.info as { positionIdx?: number } | undefined)?.positionIdx ?? 0));
+      if (indexes.some((idx) => idx === 1 || idx === 2)) mode = 'hedged';
+    } catch { mode = 'one-way'; }
+    positionModeCache.set(this.credentialsKey, { mode, at: Date.now() });
+    return mode;
   }
   async cancelOrder(orderId: string, symbol: string): Promise<ExchangeOrder> {
     try { return this.mapOrder(await this.requireClient().cancelOrder(orderId, this.marketSymbol(symbol))); } catch (error) { throw this.normalize(error); }
