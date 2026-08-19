@@ -119,13 +119,11 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
   async getMarkets(): Promise<MarketInfo[]> {
     const client = this.requireClient();
     if (!client.has.fetchMarkets) return [];
-    const expected = this.defaultType();
     try {
       const markets = await client.fetchMarkets();
       const result: MarketInfo[] = [];
       for (const market of markets) {
         if (!market || market.active === false) continue;
-        if (String(market.type ?? '').toLowerCase() !== expected) continue;
         if (!market.base || !market.quote) continue;
         const precision = (market.precision as { amount?: number | string; price?: number | string } | undefined) ?? {};
         const amountStep = precision.amount === undefined ? undefined : Number(precision.amount);
@@ -140,7 +138,6 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
           ...(priceMin !== undefined && Number.isFinite(Number(priceMin)) && Number(priceMin) > 0 ? { priceMin: Number(priceMin) } : {})
         });
       }
-      return result;
       return result;
     } catch (error) { throw this.normalize(error); }
   }
@@ -182,7 +179,7 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
   async placeOrder(order: OrderRequest): Promise<ExchangeOrder> {
     const params: Record<string, unknown> = {};
     if (order.clientOrderId) params.clientOrderId = order.clientOrderId;
-    if (order.reduceOnly) params.reduceOnly = true;
+    if (order.reduceOnly && this.marketType !== 'SPOT') params.reduceOnly = true;
     if (order.postOnly) params.postOnly = true;
     if (order.timeInForce) params.timeInForce = order.timeInForce;
     if (this.id === 'bybit' && this.marketType !== 'SPOT') {

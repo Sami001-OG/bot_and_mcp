@@ -5,10 +5,10 @@ import { listExchangeMarkets } from './markets.js';
 
 export { listExchangeMarkets };
 
-export async function portfolioSummary() {
+export async function portfolioSummary(marketType?: string) {
   const config = await getAccountConfig();
   try {
-    const { adapter, connection } = await connectToAccount();
+    const { adapter, connection } = await connectToAccount(undefined, marketType as never);
     try {
       const [balances, positions] = await Promise.all([adapter.getBalance(), adapter.getPositions()]);
       const unrealizedPnl = positions.reduce((sum, position) => sum + Number(position.unrealizedPnl), 0);

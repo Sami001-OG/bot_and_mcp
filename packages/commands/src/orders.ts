@@ -59,12 +59,13 @@ export function buildRiskContext(input: RiskContextInput): RiskContext {
 }
 
 export async function parseOrderBody(body: unknown, idempotencyKey?: string, config?: AccountConfig): Promise<OrderRequest> {
-  const resolved = config ?? (await getAccountConfig());
+  const candidate = (body ?? {}) as { exchangeAccountId?: string; marketType?: string };
+  const resolved = config ?? (candidate.exchangeAccountId ? await getAccountConfig(candidate.exchangeAccountId) : await getAccountConfig());
   const withDefaults = {
     ...(body as object),
     exchangeAccountId: resolved.id,
     exchange: resolved.exchange,
-    marketType: resolved.marketType,
+    marketType: candidate.marketType?.toUpperCase() ?? resolved.marketType,
     ...(idempotencyKey === undefined ? {} : { idempotencyKey })
   };
   return OrderRequestSchema.parse(withDefaults);
@@ -101,12 +102,12 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
   }
   const accountId = request.exchangeAccountId && request.exchangeAccountId !== 'default' ? request.exchangeAccountId : undefined;
   const config = await getAccountConfig(accountId);
-  const isLeveraged = config.marketType !== 'SPOT';
+  const isLeveraged = request.marketType !== 'SPOT';
   if (isLeveraged && request.marginMode && request.marginMode !== 'ISOLATED') throw new CommandError(400, 'CROSS_MARGIN_UNSUPPORTED', 'Only ISOLATED margin mode is supported');
   const marginMode: 'ISOLATED' | undefined = isLeveraged ? 'ISOLATED' : undefined;
   let market: { price: string; equity: string; maxEquity: string; precision: MarketPrecision | null };
   try {
-    market = await resolveMarketSnapshot(request.symbol, request.price, true, accountId);
+    market = await resolveMarketSnapshot(request.symbol, request.price, true, accountId, request.marketType);
   } catch (error) {
     throw new CommandError(503, 'MARKET_UNAVAILABLE', 'Could not resolve live market data for this order', {
       details: error instanceof ExchangeError ? error.code : error instanceof Error ? error.message : String(error)
@@ -185,6 +186,7 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
     ...(effective.leverage === undefined ? {} : { leverage: effective.leverage }),
     ...(marginMode === undefined ? {} : { marginMode }),
     ...(request.allocation ? { allocation: request.allocation } : {}),
+    marketType: request.marketType,
     source: { kind: 'manual' }
   });
   if (!row.created) {

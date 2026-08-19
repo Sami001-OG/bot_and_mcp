@@ -1,11 +1,12 @@
 ﻿'use client';
 
 import { ArrowLeftRight, Ban, Layers, RefreshCw, Send } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import AppShell, { type ShellContext } from '../components/AppShell';
 import { ApiHttpError, apiFetch, type AuthSession } from '../../lib/session';
 
 type Market = { symbol: string; base: string; quote: string; type: string; active: boolean };
+type Balance = { asset: string; free: string; locked: string; total: string };
 
 type Execution = { id: string; exchangeExecutionId: string | null; quantity: string; price: string; fee: string; feeAsset: string | null; executedAt: string | null };
 type OrderRow = {
@@ -27,9 +28,15 @@ type OrderRow = {
 type PlaceResult = { accepted: boolean; order: { id: string; state: string; symbol: string; side: string; quantity: string }; marketPrice?: string; sized?: { quantity: string; notional: string; leverage?: number }; execution?: { state: string; exchangeOrderId?: string; filled?: number; error?: string }; duplicate?: boolean };
 
 const ORDER_TYPES = ['MARKET', 'LIMIT', 'STOP', 'STOP_MARKET', 'STOP_LIMIT', 'TAKE_PROFIT', 'TAKE_PROFIT_MARKET', 'TRAILING_STOP'] as const;
+const SPOT_ORDER_TYPES = ['MARKET', 'LIMIT', 'STOP', 'STOP_MARKET', 'STOP_LIMIT', 'TAKE_PROFIT', 'TAKE_PROFIT_MARKET'] as const;
+const POSITION_SIDES = ['LONG', 'SHORT'] as const;
 const SIDES = ['BUY', 'SELL'] as const;
-const POSITION_SIDES = ['BOTH', 'LONG', 'SHORT'] as const;
 const ALLOCATION_MODES = ['FIXED_AMOUNT', 'PERCENT_EQUITY', 'PERCENT_MAX_EQUITY', 'RISK_PERCENT'] as const;
+const MARKET_MODES = [
+  { id: 'SPOT', label: 'Spot', hint: 'Buy / sell tokens. No leverage.' },
+  { id: 'USDT_FUTURES', label: 'Futures', hint: 'Leveraged positions with long / short.' },
+] as const;
+type MarketMode = (typeof MARKET_MODES)[number]['id'];
 
 const TERMINAL_STATES = new Set(['FILLED', 'REJECTED', 'CANCELED', 'FAILED', 'EXPIRED']);
 const STATE_TONES: Record<string, string> = { FILLED: 'ok', QUEUED: 'ok', RECEIVED: 'muted', PLACED: 'warn', OPEN: 'warn', PARTIALLY_FILLED: 'warn', REJECTED: 'bad', CANCELED: 'muted', FAILED: 'bad', EXPIRED: 'muted' };
@@ -67,10 +74,11 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  const [marketMode, setMarketMode] = useState<MarketMode>('USDT_FUTURES');
   const [symbol, setSymbol] = useState('');
   const [side, setSide] = useState<string>('BUY');
+  const [positionSide, setPositionSide] = useState<string>('LONG');
   const [type, setType] = useState<string>('MARKET');
-  const [positionSide, setPositionSide] = useState<string>('BOTH');
   const [sizing, setSizing] = useState<'quantity' | 'allocation'>('quantity');
   const [allocationMode, setAllocationMode] = useState<string>('FIXED_AMOUNT');
   const [quantity, setQuantity] = useState('');
@@ -79,6 +87,8 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
   const [stopPrice, setStopPrice] = useState('');
   const [reduceOnly, setReduceOnly] = useState(false);
   const [leverage, setLeverage] = useState('');
+  const [spotBalances, setSpotBalances] = useState<Balance[] | null>(null);
+  const [spotBalancesError, setSpotBalancesError] = useState(false);
 
   const loadMarkets = useCallback(async () => {
     try {
@@ -86,6 +96,17 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
       setMarkets(data.symbols);
     } catch {
       setMarkets([]);
+    }
+  }, [session]);
+
+  const loadSpotBalances = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ balances: Balance[] }>('/api/portfolio/summary?marketType=SPOT', session);
+      setSpotBalances(data.balances ?? []);
+      setSpotBalancesError(false);
+    } catch {
+      setSpotBalances(null);
+      setSpotBalancesError(true);
     }
   }, [session]);
 
@@ -108,8 +129,31 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
 
   useEffect(() => {
     void loadMarkets();
+    void loadSpotBalances();
     void loadOrders();
-  }, [loadMarkets, loadOrders]);
+  }, [loadMarkets, loadSpotBalances, loadOrders]);
+
+  const modeSymbols = useMemo(() => {
+    const want = marketMode === 'SPOT' ? 'spot' : 'swap';
+    return (markets ?? []).filter((market) => market.type === want);
+  }, [markets, marketMode]);
+
+  const spotHoldingBase = useMemo(() => {
+    if (marketMode !== 'SPOT' || !spotBalances) return null;
+    const base = (symbol.split('/')[0] ?? '').toUpperCase();
+    const balance = spotBalances.find((entry) => entry.asset.toUpperCase() === base);
+    return balance ? Number(balance.total) : 0;
+  }, [marketMode, spotBalances, symbol]);
+
+  const switchMode = (mode: MarketMode) => {
+    setMarketMode(mode);
+    setSymbol((current) => {
+      const hasSuffix = current.includes(':');
+      if (mode === 'SPOT' && hasSuffix) return current.split(':')[0] ?? current;
+      if (mode === 'USDT_FUTURES' && !hasSuffix && current) return `${current}:USDT`;
+      return current;
+    });
+  };
 
   const placeOrder = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -129,12 +173,15 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
     }
     setSubmitting(true);
     try {
+      const isFutures = marketMode === 'USDT_FUTURES';
+      const effectiveSide = isFutures ? (positionSide === 'LONG' ? 'BUY' : 'SELL') : side;
       const body: Record<string, unknown> = {
         symbol,
-        side,
-        positionSide,
+        side: effectiveSide,
+        positionSide: isFutures ? positionSide : 'BOTH',
         type,
-        reduceOnly,
+        marketType: marketMode,
+        reduceOnly: isFutures && reduceOnly,
         clientOrderId: `ui-${Math.random().toString(36).slice(2, 12)}`,
         idempotencyKey: crypto.randomUUID(),
       };
@@ -146,7 +193,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
       if (price.trim()) body.price = price.trim();
       if (stopPrice.trim()) body.stopPrice = stopPrice.trim();
       const leverageNumber = Number(leverage);
-      if (leverageNumber >= 1 && leverageNumber <= 200) body.leverage = leverageNumber;
+      if (isFutures && leverageNumber >= 1 && leverageNumber <= 200) body.leverage = leverageNumber;
 
       const result = await apiFetch<PlaceResult>('/api/orders', session, {
         method: 'POST',
@@ -157,7 +204,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
       } else {
         const executionNote = result.execution?.error ? ` · ${result.execution.error}` : '';
         const sizingNote = result.sized ? ` · ${result.sized.quantity} @ ${result.marketPrice ?? '?'} (${result.sized.notional} USDT${result.sized.leverage ? `, ${result.sized.leverage}x` : ''})` : '';
-        setNotice({ tone: 'success', message: `Order ${result.order.state} — ${side} ${sizing === 'quantity' ? quantity : `${allocationMode} ${allocationValue}`} ${symbol}${sizingNote}${executionNote}.` });
+        setNotice({ tone: 'success', message: `Order ${result.order.state} — ${effectiveSide} ${sizing === 'quantity' ? quantity : `${allocationMode} ${allocationValue}`} ${symbol}${sizingNote}${executionNote}.` });
       }
       setQuantity('');
       setAllocationValue('');
@@ -181,7 +228,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
   };
 
   const closeAll = async () => {
-    if (!window.confirm('Cancel all open orders and place market reduce-only orders to close ALL open positions?')) return;
+    if (!window.confirm('Cancel all open orders and place market reduce-only orders to close ALL open futures positions?')) return;
     try {
       const result = await apiFetch<{ canceled: number; positionsToClose: number; closed: number; closeFailures: string[] }>('/api/orders/emergency/close-all', session, { method: 'POST', body: {} });
       setNotice({ tone: 'info', message: `Close-all: canceled ${result.canceled}, closed ${result.closed}/${result.positionsToClose} positions${result.closeFailures.length > 0 ? ` · ${result.closeFailures.length} failed` : ''}.` });
@@ -190,6 +237,9 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Close-all failed.' });
     }
   };
+
+  const isFutures = marketMode === 'USDT_FUTURES';
+  const sellDisabled = marketMode === 'SPOT' && side === 'SELL' && spotBalances !== null && !spotBalancesError && (spotHoldingBase ?? 0) <= 0;
 
   return (
     <>
@@ -203,9 +253,11 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
           <button className="secondary" disabled={loadingOrders} onClick={() => void loadOrders()} type="button">
             <RefreshCw size={14} /> Refresh
           </button>
-          <button className="danger" onClick={() => void closeAll()} type="button">
-            <Layers size={14} /> Close all
-          </button>
+          {isFutures && (
+            <button className="danger" onClick={() => void closeAll()} type="button">
+              <Layers size={14} /> Close all
+            </button>
+          )}
         </div>
       </header>
 
@@ -215,16 +267,25 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
             <div>
               <p>NEW ORDER</p>
               <h3>Place on Bybit</h3>
+              <p className="muted small">One unified account trades both spot and futures.</p>
             </div>
-            <span className="status-label warn">CONFIGURED ACCOUNT</span>
+            <span className="status-label warn">{isFutures ? 'FUTURES' : 'SPOT'}</span>
           </div>
+          <div className="sizing-toggle">
+            {MARKET_MODES.map((mode) => (
+              <button className={marketMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => switchMode(mode.id)} type="button">
+                {mode.label}
+              </button>
+            ))}
+          </div>
+          <p className="muted small">{isFutures ? MARKET_MODES[1].hint : MARKET_MODES[0].hint}</p>
           <form onSubmit={placeOrder}>
             <div className="form-row">
               <label>
                 Symbol
-                <input list="order-markets" onChange={(event) => setSymbol(event.target.value)} placeholder="e.g. BTC/USDT:USDT" required value={symbol} />
+                <input list="order-markets" onChange={(event) => setSymbol(event.target.value)} placeholder={isFutures ? 'e.g. BTC/USDT:USDT' : 'e.g. BTC/USDT'} required value={symbol} />
                 <datalist id="order-markets">
-                  {(markets ?? []).slice(0, 500).map((market) => (
+                  {modeSymbols.slice(0, 500).map((market) => (
                     <option key={market.symbol} value={market.symbol} />
                   ))}
                 </datalist>
@@ -232,7 +293,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
               <label>
                 Type
                 <select onChange={(event) => setType(event.target.value)} value={type}>
-                  {ORDER_TYPES.map((option) => (
+                  {(isFutures ? ORDER_TYPES : SPOT_ORDER_TYPES).map((option) => (
                     <option key={option} value={option}>
                       {option}
                     </option>
@@ -242,24 +303,36 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
             </div>
             <div className="form-row">
               <label>
-                Side
-                <select onChange={(event) => setSide(event.target.value)} value={side}>
-                  {SIDES.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
+                {isFutures ? 'Position side' : 'Side'}
+                <span className="sizing-toggle">
+                  {(isFutures ? POSITION_SIDES : SIDES).map((option) => {
+                    const selected = isFutures ? positionSide === option : side === option;
+                    const disabled = marketMode === 'SPOT' && option === 'SELL' && sellDisabled;
+                    return (
+                      <button
+                        className={selected ? 'active' : ''}
+                        disabled={disabled}
+                        key={option}
+                        onClick={() => (isFutures ? setPositionSide(option) : setSide(option))}
+                        title={disabled ? `You have no ${(symbol.split('/')[0] ?? '').toUpperCase()} spot balance — buy first` : undefined}
+                        type="button"
+                      >
+                        {option}
+                      </button>
+                    );
+                  })}
+                </span>
               </label>
               <label>
-                Position side
-                <select onChange={(event) => setPositionSide(event.target.value)} value={positionSide}>
-                  {POSITION_SIDES.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
+                Sizing
+                <span className="sizing-toggle">
+                  <button className={sizing === 'quantity' ? 'active' : ''} onClick={() => setSizing('quantity')} type="button">
+                    Quantity
+                  </button>
+                  <button className={sizing === 'allocation' ? 'active' : ''} onClick={() => setSizing('allocation')} type="button">
+                    Allocation
+                  </button>
+                </span>
               </label>
             </div>
             <fieldset className="action-field">
@@ -288,14 +361,6 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
                   </select>
                 </label>
               </div>
-              <div className="sizing-toggle">
-                <button className={sizing === 'quantity' ? 'active' : ''} onClick={() => setSizing('quantity')} type="button">
-                  Use quantity
-                </button>
-                <button className={sizing === 'allocation' ? 'active' : ''} onClick={() => setSizing('allocation')} type="button">
-                  Use allocation
-                </button>
-              </div>
               <label>
                 {allocationMode === 'FIXED_AMOUNT' ? 'Amount USDT' : 'Percent'}
                 <input
@@ -322,18 +387,26 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
                 <input min="0" onChange={(event) => setStopPrice(event.target.value)} placeholder="0.00" step="any" type="number" value={stopPrice} />
               </label>
             )}
-            <div className="form-row">
-              <label>
-                Leverage (futures)
-                <input max="200" min="1" onChange={(event) => setLeverage(event.target.value)} placeholder="1–200" type="number" value={leverage} />
-              </label>
-              <label className="checkbox">
-                <input checked={reduceOnly} onChange={(event) => setReduceOnly(event.target.checked)} type="checkbox" /> Reduce-only close
-              </label>
-            </div>
+            {isFutures ? (
+              <div className="form-row">
+                <label>
+                  Leverage
+                  <input max="200" min="1" onChange={(event) => setLeverage(event.target.value)} placeholder="1–200" type="number" value={leverage} />
+                </label>
+                <label className="checkbox">
+                  <input checked={reduceOnly} onChange={(event) => setReduceOnly(event.target.checked)} type="checkbox" /> Reduce-only close
+                </label>
+              </div>
+            ) : (
+              spotBalances !== null && (
+                <p className="muted small">
+                  Spot holdings: {spotBalances.filter((entry) => Number(entry.total) > 0).length} asset{spotBalances.filter((entry) => Number(entry.total) > 0).length === 1 ? '' : 's'} on the account.
+                </p>
+              )
+            )}
             <div className="modal-actions">
-              <button className="primary" disabled={submitting} type="submit">
-                <Send size={14} /> {submitting ? 'Submitting…' : 'Place order'}
+              <button className="primary" disabled={submitting || sellDisabled} type="submit">
+                <Send size={14} /> {submitting ? 'Submitting…' : isFutures ? `Place ${positionSide}` : `Place ${side}`}
               </button>
             </div>
           </form>

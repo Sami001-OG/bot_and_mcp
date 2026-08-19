@@ -91,17 +91,20 @@ function formatConfig(config: BotConfig): string {
   return parts.join(' · ');
 }
 
-function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, onChange }: { markets: Market[] | null; marketsError: string | null; onRetryMarkets: () => void; selected: string[]; onChange: (next: string[]) => void }) {
+function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, onChange, marketType }: { markets: Market[] | null; marketsError: string | null; onRetryMarkets: () => void; selected: string[]; onChange: (next: string[]) => void; marketType?: string }) {
   const [query, setQuery] = useState('');
   const [custom, setCustom] = useState('');
 
+  const typeFilter = marketType?.toUpperCase() === 'SPOT' ? 'spot' : 'swap';
+  const scoped = (markets ?? []).filter((market) => market.type === typeFilter);
+
   const toggle = (symbol: string) => onChange(selected.includes(symbol) ? selected.filter((item) => item !== symbol) : [...selected, symbol]);
   const queryUpper = query.trim().toUpperCase();
-  const known = new Set((markets ?? []).map((market) => market.symbol));
-  const matching = (markets ?? []).filter((market) => market.symbol.toUpperCase().includes(queryUpper));
+  const known = new Set(scoped.map((market) => market.symbol));
+  const matching = scoped.filter((market) => market.symbol.toUpperCase().includes(queryUpper));
   const orphaned = selected.filter((symbol) => !known.has(symbol));
   const addMatches = () => onChange([...selected, ...matching.map((market) => market.symbol).filter((symbol) => !selected.includes(symbol))]);
-  const addAll = () => onChange([...selected, ...(markets ?? []).map((market) => market.symbol).filter((symbol) => !selected.includes(symbol))]);
+  const addAll = () => onChange([...selected, ...scoped.map((market) => market.symbol).filter((symbol) => !selected.includes(symbol))]);
   const addCustom = () => {
     const trimmed = custom.trim().toUpperCase();
     if (trimmed && !selected.includes(trimmed)) onChange([...selected, trimmed]);
@@ -115,7 +118,7 @@ function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, onChang
         <input className="symbol-search" onChange={(event) => setQuery(event.target.value)} placeholder="Search pairs (BTC, ETH, DOGE…)" type="search" value={query} />
         <div className="symbol-actions">
           <button disabled={!queryUpper} onClick={addMatches} type="button">Add all matches</button>
-          <button disabled={(markets ?? []).length === 0} onClick={addAll} type="button">Select all</button>
+          <button disabled={scoped.length === 0} onClick={addAll} type="button">Select all</button>
           <button disabled={selected.length === 0} onClick={() => onChange([])} type="button">Clear</button>
         </div>
       </div>
@@ -127,7 +130,7 @@ function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, onChang
             <button className="secondary" onClick={onRetryMarkets} type="button"><RefreshCw size={13} /> Retry</button>
           </div>
         )}
-        {markets && markets.length === 0 && <p className="muted small">No markets returned by the exchange.</p>}
+        {markets && scoped.length === 0 && <p className="muted small">No markets of this type returned by the exchange.</p>}
         {markets && matching.length === 0 && queryUpper && <p className="muted small">No matching markets.</p>}
         {orphaned.map((symbol) => (
           <label className="symbol-row orphan" key={`custom-${symbol}`}>
@@ -574,7 +577,14 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
                   {selected && selected.exchangeAccount ? `${selected.exchangeAccount.label ?? selected.exchangeAccount.exchange} ${selected.exchangeAccount.marketType}` : 'bound at creation'}
                 </p>
               )}
-              <SymbolPicker markets={markets} marketsError={marketsError} onRetryMarkets={() => void loadMarkets()} onChange={setSymbols} selected={symbols} />
+              <SymbolPicker
+                markets={markets}
+                marketsError={marketsError}
+                onRetryMarkets={() => void loadMarkets()}
+                onChange={setSymbols}
+                selected={symbols}
+                {...(editTarget ? (selected?.exchangeAccount?.marketType ? { marketType: selected.exchangeAccount.marketType } : {}) : (accounts.find((account) => account.id === selectedAccountId)?.marketType ? { marketType: accounts.find((account) => account.id === selectedAccountId)!.marketType } : {}))}
+              />
               <div className="form-row">
                 <label>Allocation mode<select defaultValue={prefill?.allocation?.mode ?? 'NONE'} name="allocationMode">{ALLOCATION_OPTIONS.map((mode) => <option key={mode} value={mode}>{mode === 'NONE' ? 'Use signal size' : mode}</option>)}</select></label>
                 <label>Amount / percent<input defaultValue={prefill?.allocation?.mode === 'FIXED_AMOUNT' ? prefill.allocation.amount : prefill?.allocation?.percent ?? ''} min="0.001" name="allocationValue" step="any" type="number" /></label>

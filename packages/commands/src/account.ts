@@ -25,9 +25,9 @@ export async function getAccountConfig(accountId?: string): Promise<AccountConfi
   };
 }
 
-export async function connectToAccount(accountId?: string): Promise<{ adapter: ExchangeAdapter; connection: ExchangeConnection; config: AccountConfig }> {
+export async function connectToAccount(accountId?: string, marketType?: MarketType): Promise<{ adapter: ExchangeAdapter; connection: ExchangeConnection; config: AccountConfig }> {
   const config = await getAccountConfig(accountId);
-  const adapter = createExchangeAdapter(config.exchange, config.marketType);
+  const adapter = createExchangeAdapter(config.exchange, marketType ?? config.marketType);
   try {
     const connection = await adapter.connect({ apiKey: config.apiKey, secret: config.secret, testnet: config.testnet });
     return { adapter, connection, config };
@@ -37,8 +37,8 @@ export async function connectToAccount(accountId?: string): Promise<{ adapter: E
   }
 }
 
-export async function resolveMarketSnapshot(symbol: string, requestPrice?: string, includePrecision = true, accountId?: string): Promise<{ price: string; equity: string; maxEquity: string; precision: MarketPrecision | null }> {
-  const { adapter } = await connectToAccount(accountId);
+export async function resolveMarketSnapshot(symbol: string, requestPrice?: string, includePrecision = true, accountId?: string, marketType?: MarketType): Promise<{ price: string; equity: string; maxEquity: string; precision: MarketPrecision | null }> {
+  const { adapter } = await connectToAccount(accountId, marketType);
   try {
     const price = requestPrice ?? (await adapter.getPrice(symbol));
     const precision = includePrecision ? await marketPrecisionOf(adapter, symbol) : null;

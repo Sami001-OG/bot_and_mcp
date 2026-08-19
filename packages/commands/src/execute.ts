@@ -117,12 +117,13 @@ export async function executeOrderNow(orderId: string): Promise<ExecuteResult> {
     return { orderId, state: 'REJECTED', error: 'LIVE_TRADING_DISABLED' };
   }
   const config = await getAccountConfig(order.exchangeAccountId ?? undefined);
+  const marketType = (order.marketType ?? config.marketType).toUpperCase() as 'SPOT' | 'USDT_FUTURES';
   let submitted = false;
   let attempt = 0;
   while (true) {
     let adapter: ExchangeAdapter | undefined;
     try {
-      const session = await connectToAccount(order.exchangeAccountId ?? undefined);
+      const session = await connectToAccount(order.exchangeAccountId ?? undefined, marketType);
       adapter = session.adapter;
       if (order.exchangeOrderId) {
         const result = await reconcileOrder(adapter, order);
@@ -181,16 +182,16 @@ export async function executeOrderNow(orderId: string): Promise<ExecuteResult> {
       }
       const snappedPrice = precision && order.price !== null ? alignPrice(order.price, precision) : order.price;
       const snappedStop = precision && order.stopPrice !== null ? alignPrice(order.stopPrice, precision) : order.stopPrice;
-      if (config.marketType !== 'SPOT') {
+      if (marketType !== 'SPOT') {
         await adapter.setMarginMode(order.symbol, (order.marginMode ?? 'ISOLATED') as 'ISOLATED').catch(() => undefined);
       }
-      if (config.marketType !== 'SPOT' && order.leverage) {
+      if (marketType !== 'SPOT' && order.leverage) {
         await adapter.setLeverage(order.symbol, order.leverage).catch(() => undefined);
       }
       const request = OrderRequestSchema.parse({
         exchangeAccountId: order.exchangeAccountId ?? 'default',
         exchange: config.exchange,
-        marketType: config.marketType,
+        marketType,
         symbol: order.symbol,
         side: order.side,
         positionSide: order.positionSide,
@@ -383,6 +384,7 @@ export type PersistOrderOptions = {
   leverage?: number;
   marginMode?: 'ISOLATED' | 'CROSS';
   allocation?: Allocation;
+  marketType?: string;
   source?: Record<string, unknown>;
   exchangeAccountId?: string;
 };
@@ -398,7 +400,7 @@ export async function persistOrder(order: PersistedOrderLike, options: PersistOr
         side: order.side,
         positionSide: order.positionSide,
         orderType: order.type,
-        marketType: config.marketType,
+        marketType: options.marketType ?? config.marketType,
         exchangeAccountId: config.id,
         quantity: order.quantity,
         ...(order.price ? { price: order.price } : {}),

@@ -54,8 +54,9 @@ export async function fetchMarketsCached(): Promise<MarketsResult> {
   }
 }
 
-export async function listExchangeMarkets(quote?: string): Promise<MarketInfo[]> {
+export async function listExchangeMarkets(quote?: string, marketType?: string): Promise<MarketInfo[]> {
   const { markets } = await fetchMarketsCached();
-  const filtered = quote ? markets.filter((market) => market.quote.toUpperCase() === quote.toUpperCase()) : markets;
+  const typeFilter = marketType?.toUpperCase() === 'SPOT' ? 'spot' : marketType?.toUpperCase() === 'USDT_FUTURES' ? 'swap' : marketType?.toUpperCase() === 'COIN_FUTURES' ? 'delivery' : marketType?.toUpperCase() === 'PERPETUAL' ? 'perpetual' : marketType?.toUpperCase() === 'MARGIN' ? 'margin' : undefined;
+  const filtered = markets.filter((market) => (quote ? market.quote.toUpperCase() === quote.toUpperCase() : true) && (typeFilter === undefined || market.type === typeFilter));
   return filtered.sort((a, b) => a.symbol.localeCompare(b.symbol));
 }
