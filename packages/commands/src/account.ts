@@ -6,7 +6,7 @@ import { getSettings, updateSettings } from './settings.js';
 import { getAccountSecret, getPrimaryAccount } from './exchange-accounts.js';
 import { fetchMarketsCached } from './markets.js';
 
-export type AccountConfig = { id: string; exchange: ExchangeId; marketType: MarketType; label: string; apiKey: string; secret: string };
+export type AccountConfig = { id: string; exchange: ExchangeId; marketType: MarketType; label: string; apiKey: string; secret: string; testnet: boolean };
 
 function labelOf(exchange: string, marketType: string): string {
   return `${exchange} ${marketType === 'SPOT' ? 'Spot' : marketType === 'USDT_FUTURES' ? 'USDT Futures' : marketType === 'COIN_FUTURES' ? 'Coin Futures' : marketType}`;
@@ -21,6 +21,7 @@ export async function getAccountConfig(accountId?: string): Promise<AccountConfi
     label: resolved.account.label ?? labelOf(resolved.exchange, resolved.marketType),
     apiKey: resolved.apiKey,
     secret: resolved.secret,
+    testnet: resolved.account.testnet === true,
   };
 }
 
@@ -28,7 +29,7 @@ export async function connectToAccount(accountId?: string): Promise<{ adapter: E
   const config = await getAccountConfig(accountId);
   const adapter = createExchangeAdapter(config.exchange, config.marketType);
   try {
-    const connection = await adapter.connect({ apiKey: config.apiKey, secret: config.secret });
+    const connection = await adapter.connect({ apiKey: config.apiKey, secret: config.secret, testnet: config.testnet });
     return { adapter, connection, config };
   } catch (error) {
     await adapter.disconnect().catch(() => undefined);

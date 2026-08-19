@@ -60,6 +60,7 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
     const Constructor = ccxt[ccxtNames[this.id]] as unknown as new (config: Record<string, unknown>) => Exchange;
     const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
     this.client = new Constructor({ apiKey: credentials.apiKey, secret: credentials.secret, password: credentials.passphrase, walletAddress: credentials.walletAddress, privateKey: credentials.privateKey, enableRateLimit: true, options: { defaultType: this.defaultType(), fetchOpenOrders: { warnWithoutSymbol: false }, ...(this.id === 'bybit' ? { recvWindow: 60000, adjustForTimeDifference: true } : {}) }, ...(proxy ? { httpsProxy: proxy } : {}) });
+    if (credentials.testnet) this.client.setSandboxMode(true);
     try {
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt++) {

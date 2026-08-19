@@ -18,7 +18,7 @@ export async function GET(): Promise<NextResponse> {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     await requireSession();
-    const body = (await request.json().catch(() => ({}))) as { exchange?: unknown; marketType?: unknown; label?: unknown; apiKey?: unknown; secret?: unknown };
+    const body = (await request.json().catch(() => ({}))) as { exchange?: unknown; marketType?: unknown; label?: unknown; apiKey?: unknown; secret?: unknown; testnet?: unknown };
     if (typeof body.exchange !== 'string' || typeof body.marketType !== 'string') {
       return NextResponse.json({ message: 'exchange and marketType are required', code: 'VALIDATION_ERROR' }, { status: 400 });
     }
@@ -31,6 +31,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       ...(typeof body.label === 'string' ? { label: body.label } : {}),
       apiKey: body.apiKey,
       secret: body.secret,
+      testnet: body.testnet === true,
     });
     return NextResponse.json({ account }, { status: 201 });
   } catch (error) {

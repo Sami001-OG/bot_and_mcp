@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'node:crypto';
-import { checkCircuitBreaker, scanForStaleOrders, syncPositionsNow } from '@platform/commands';
+import { checkCircuitBreaker, runAllBotManagement, scanForStaleOrders, syncPositionsNow } from '@platform/commands';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -24,14 +24,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
   const results: Record<string, unknown> = { ranAt: new Date().toISOString() };
   try {
-    const [breaker, stale, positions] = await Promise.all([
+    const [breaker, stale, positions, management] = await Promise.all([
       checkCircuitBreaker().catch((error) => ({ ok: false, reason: error instanceof Error ? error.message : String(error) })),
       scanForStaleOrders().catch((error) => ({ error: error instanceof Error ? error.message : String(error) })),
       syncPositionsNow().catch((error) => ({ error: error instanceof Error ? error.message : String(error) })),
+      runAllBotManagement().catch((error) => ({ error: error instanceof Error ? error.message : String(error) })),
     ]);
     results.breaker = breaker;
     results.stale = stale;
     results.positions = positions;
+    results.management = management;
     return NextResponse.json(results);
   } catch (error) {
     results.error = error instanceof Error ? error.message : String(error);

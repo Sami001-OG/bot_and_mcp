@@ -9,6 +9,7 @@ export type ExchangeAccountPublic = {
   marketType: string;
   label: string | null;
   isPrimary: boolean;
+  testnet: boolean;
   keyPreview: string;
   botCount: number;
   createdAt: Date;
@@ -24,6 +25,7 @@ function toPublic(account: ExchangeAccount, botCount = 0): ExchangeAccountPublic
     marketType: account.marketType,
     label: account.label,
     isPrimary: account.isPrimary,
+    testnet: account.testnet === true,
     keyPreview: `${account.apiKey.slice(0, 4)}****${account.apiKey.slice(-4)}`,
     botCount,
     createdAt: account.createdAt,
@@ -36,7 +38,7 @@ export async function listExchangeAccounts(): Promise<ExchangeAccountPublic[]> {
   return accounts.map((account) => toPublic(account, account._count.bots));
 }
 
-export async function createExchangeAccount(input: { exchange: string; marketType: string; label?: string; apiKey: string; secret: string }): Promise<ExchangeAccountPublic> {
+export async function createExchangeAccount(input: { exchange: string; marketType: string; label?: string; apiKey: string; secret: string; testnet?: boolean }): Promise<ExchangeAccountPublic> {
   const exchange = input.exchange.trim().toLowerCase();
   if (!(SUPPORTED_EXCHANGES as readonly string[]).includes(exchange)) {
     throw new CommandError(400, 'EXCHANGE_NOT_SUPPORTED', `Exchange not supported. Supported exchanges: ${SUPPORTED_EXCHANGES.join(', ')}`);
@@ -54,6 +56,7 @@ export async function createExchangeAccount(input: { exchange: string; marketTyp
       label: input.label?.trim() || null,
       apiKey,
       apiSecret: encryptSecret(secret),
+      testnet: input.testnet === true,
       isPrimary: existingCount === 0,
     },
   });

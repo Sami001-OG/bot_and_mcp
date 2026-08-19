@@ -11,6 +11,7 @@ type ExchangeAccount = {
   marketType: string;
   label: string | null;
   isPrimary: boolean;
+  testnet: boolean;
   keyPreview: string;
   botCount: number;
   createdAt: string;
@@ -35,6 +36,7 @@ function AccountsBody({ session, setNotice }: { session: AuthSession; setNotice:
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [marketType, setMarketType] = useState<string>('USDT_FUTURES');
+  const [testnet, setTestnet] = useState(false);
   const [label, setLabel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [secret, setSecret] = useState('');
@@ -65,7 +67,7 @@ function AccountsBody({ session, setNotice }: { session: AuthSession; setNotice:
     try {
       const result = await apiFetch<{ account: ExchangeAccount }>('/api/exchange-accounts', session, {
         method: 'POST',
-        body: { exchange: 'bybit', marketType, ...(label.trim() ? { label: label.trim() } : {}), apiKey: apiKey.trim(), secret: secret.trim() },
+        body: { exchange: 'bybit', marketType, testnet, ...(label.trim() ? { label: label.trim() } : {}), apiKey: apiKey.trim(), secret: secret.trim() },
       });
       setApiKey('');
       setSecret('');
@@ -145,6 +147,10 @@ function AccountsBody({ session, setNotice }: { session: AuthSession; setNotice:
                 ))}
               </select>
             </label>
+            <label className="checkbox">
+              <input checked={testnet} onChange={(event) => setTestnet(event.target.checked)} type="checkbox" />
+              <span>Bybit <b>testnet</b> (test funds, USDT-M testnet keys from testnet.bybit.com)</span>
+            </label>
             <label>
               Label (optional)
               <input onChange={(event) => setLabel(event.target.value)} placeholder="e.g. Main futures account" value={label} />
@@ -195,6 +201,11 @@ function AccountsBody({ session, setNotice }: { session: AuthSession; setNotice:
                   <tr key={account.id}>
                     <td>
                       <b>{account.label ?? `${account.exchange} ${account.marketType}`}</b>
+                      {account.testnet && (
+                        <span className="status-label warn" title="Bybit testnet account — test funds only">
+                          TESTNET
+                        </span>
+                      )}
                     </td>
                     <td>{account.exchange}</td>
                     <td>{account.marketType}</td>

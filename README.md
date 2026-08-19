@@ -71,6 +71,7 @@ Go to **Exchange APIs** (`/accounts`):
    - **Label** — a friendly name, e.g. "futures-main".
    - **Exchange** — currently `bybit`.
    - **Market type** — `USDT_FUTURES` (linear perpetuals) or `SPOT`.
+   - **Testnet** — check to use Bybit **testnet** (test funds, `api-testnet.bybit.com`). Keys must come from `testnet.bybit.com` (separate login, USDT-M testnet keys). Testnet accounts are marked with a TESTNET badge and behave exactly like mainnet accounts — ideal for dry-running bots and cron flows without real money.
    - **API key** and **API secret** — from Bybit (My Account → API Management). Create a read-write key; restrict withdrawal rights. The secret is encrypted with AES-256-GCM before it reaches MongoDB.
 2. The first account automatically becomes **primary** (the default account for manual orders, dashboard reads, and MCP read tools). The list shows `keyPreview` (e.g. `LICs****iMMB`) so you can identify accounts without ever seeing the full key, and `botCount` — the number of bots bound to it.
 3. **Set primary** — switches the default account for anything not bound to a specific account.
@@ -484,10 +485,19 @@ To connect Claude Desktop or any MCP client, use the **streamable HTTP** transpo
 `POST /api/cron` runs housekeeping that would otherwise be the BullMQ-era scheduled jobs:
 
 - Auth: `x-cron-secret: <CRON_SECRET>` header (or `Authorization: Bearer <CRON_SECRET>`). Returns 503 if `CRON_SECRET` is unset, 401 on mismatch.
-- Runs three jobs in parallel: `checkCircuitBreaker` (re-evaluates the daily-loss breaker), `scanForStaleOrders` (reconciles orders stuck in flight), `syncPositionsNow` (re-fetch positions + mark prices from Bybit).
-- Response: `{ ranAt, breaker, stale, positions }`.
+- Runs four jobs in parallel: `checkCircuitBreaker` (re-evaluates the daily-loss breaker), `scanForStaleOrders` (reconciles orders stuck in flight), `syncPositionsNow` (re-fetch positions + mark prices from Bybit), `runAllBotManagement` (runs the DCA/breakeven/partial-TP management pass for every ACTIVE bot — same engine the webhook `MANAGE` action triggers, no signing needed).
+- Response: `{ ranAt, breaker, stale, positions, management }` where `management` is one summary per active bot: `{ botId, name, result }` (or `{ botId, name, error }`).
 
-On Vercel, add a cron job (e.g. every 5 minutes) hitting this endpoint with the secret header. Locally, `curl -X POST http://localhost:3000/api/cron -H "x-cron-secret: $env:CRON_SECRET"`.
+On Vercel, add a cron job (e.g. **every 1 minute**) hitting this endpoint with the secret header — a free cron service like [cron-job.org](https://cron-job.org) supports 1-minute intervals and custom headers:
+
+1. cron-job.org → **Create job**.
+2. Request URL: `https://web-blue-delta-17.vercel.app/api/cron` — method `POST`.
+3. **Headers**: `x-cron-secret: <CRON_SECRET>` (from your Vercel env).
+4. Schedule: **every 1 minute**, timezone UTC. Save and run once to confirm HTTP 200.
+
+This gives you a free, always-on "management ticker": DCA steps, breakeven moves and partial-TP claims are evaluated every minute even when no webhook signal arrives. Note the Vercel Hobby function timeout (10 s default, up to 60 s) — each bot's manage pass takes ~2–4 s, so a handful of bots fits comfortably.
+
+Locally, `curl -X POST http://localhost:3000/api/cron -H "x-cron-secret: $env:CRON_SECRET"`.
 
 ## REST API reference
 
@@ -575,7 +585,7 @@ All packages are bundled into the `.next` build — after editing a package you 
 
 ## Architecture and data model
 
-- **Persistence**: MongoDB, single database `tradingbot`. Prisma models: `ExchangeAccount` (encrypted `apiSecret`, `isPrimary`), `Bot` (bound `exchangeAccountId`, JSON config, versions), `BotRun` (metrics incl. the management pass), `BotState` (per-bot DCA/breakeven/TP progress), `OrderIntent` (exchangeAccountId + `source` records origin: webhook/MCP/manual/bot-manage), `Execution`, `Position`, `WebhookEndpoint` (+ signing secret), `WebhookDelivery` (nonce replay claims), `Notification`, `Settings` (kill switch, daily loss limit, equity/peak), `MarketCache` (15-min markets cache).
+- **Persistence**: MongoDB, single database `tradingbot`. Prisma models: `ExchangeAccount` (encrypted `apiSecret`, `isPrimary`, `testnet`), `Bot` (bound `exchangeAccountId`, JSON config, versions), `BotRun` (metrics incl. the management pass), `BotState` (per-bot DCA/breakeven/TP progress), `OrderIntent` (exchangeAccountId + `source` records origin: webhook/MCP/manual/bot-manage), `Execution`, `Position`, `WebhookEndpoint` (+ signing secret), `WebhookDelivery` (nonce replay claims), `Notification`, `Settings` (kill switch, daily loss limit, equity/peak), `MarketCache` (15-min markets cache).
 - **Position management** (`manageBotPositions`, `packages/commands/src/manage.ts`): runs automatically at the end of every bot run and on demand via the MCP `manageBot` tool. State (DCA step count, breakeven-applied flag, claimed/placed TP levels) persists per bot in `BotState`, so steps don't repeat across runs. Management orders use `btdc-`/`btbr-`/`bttp-`/`btcl-` clientOrderId prefixes and `source.kind: bot-manage`.
 - **Clock handling**: this VM drifts; the Bybit adapter always sets `recvWindow: 30000` + `adjustForTimeDifference: true` — requests fail with 10002 otherwise. Never disable.
 - **Risk pipeline** (`evaluateOrder`): trading enablement → daily-loss breaker → margin vs. equity → min-notional ($10 futures / $5 spot floor) → leverage bounds → size alignment to exchange precision (`alignAmount`/`alignPrice`, `PRECISION_REJECTED` below `amountMin`).

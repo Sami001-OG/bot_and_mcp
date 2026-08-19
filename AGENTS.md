@@ -29,7 +29,9 @@
 - BullMQ-era rule (still applies to job ids anywhere): custom IDs **cannot contain `:`** — use `-` separators.
 
 ## Work State
-### Completed (current session — bot-only trading + DCA/breakeven/partial-TP + webhook management control, E2E + prod verified)
+### Completed (current session — bot-only trading + DCA/breakeven/partial-TP + webhook management control + testnet + cron manage pass, E2E + prod verified)
+- **Testnet support**: `ExchangeAccount.testnet` (Boolean, default false) in Prisma (pushed Atlas + local); ccxt `setSandboxMode(true)` in `connect()` when `credentials.testnet`; `AccountConfig.testnet` + `createExchangeAccount(testnet?)` + `toPublic.testnet`; accounts UI checkbox + TESTNET badge; API route passes `testnet`. No MCP createAccount tool (UI-only). Note: local mongod keeps dying — restart with the documented mongod command; if it crashes on startup (snappy recovery), wipe `data`, restart, re-initiate RS.
+- **Cron manage pass** (cron-job.org-style ping): `runAllBotManagement()` in manage.ts (iterate ACTIVE bots, `manageBotPositions(bot.id)` per bot, errors isolated) + `/api/cron` step in `Promise.all` (keeps CRON_SECRET header auth). Smoke: cron 401 without secret, 200 with secret, management summaries. Optional smoke testnet case: `TESTNET_API_KEY`/`TESTNET_SECRET_KEY` in `.env` (skipped when absent).
 - **Webhook management control** (user directive: external app will drive the webhook): `TradingViewSignalSchema` now accepts optional ephemeral `dca`/`breakeven`/`partialTps` overrides (replace saved config for that run only; presence implies enabled unless `enabled:false`; schemas `DcaOverrideSchema`/`BreakevenOverrideSchema`/`PartialTpsOverrideSchema` + `ManagementOverrides` type) and a `MANAGE` action (management-only run, no orders, `size` forbidden — `size` is now optional with a superRefine: required unless MANAGE). `mergeManagementOverrides` (pure, exported) + `manageBotPositions(botId, overrides?)` in manage.ts; `runBotEvaluation` (bots.ts) branches MANAGE early and passes overrides to the auto manage pass (runs when effective config enables any capability). Webhook delivery `bots[]` entries now include `status` + `managed`. README has 8 comprehensive signed-payload examples (entry, DCA override, breakeven+TP tuning, MANAGE tick, PARTIAL_EXIT, MOVE_STOP, CLOSE, REVERSE). Tests: commands 16, contracts 8, bot-engine 17 — all green; smoke exit 0 with override + MANAGE cases. Deployed to Vercel prod.
 - **Bot-only execution** ("no bot, no trade"): webhook signals route ONLY to the owning bot (fallback-to-all-bots removed); global MCP trade tools require `botId` (`BOT_REQUIRED` 409); per-bot MCP servers at `/api/mcp/bots/<botId>` authenticated with `Bearer <bot password>` (constantTimeEqual vs `bot.webhook.signingSecret`); trade tools injected with botId, admin tools excluded; `CommandError` mapped to MCP errors.
 - **Creator password** (user directive): `createBot` accepts `password?` (≥12 chars, else randomUUID); the password = webhook HMAC signing secret AND per-bot MCP Bearer; returned once in `{ webhook: {id,url,signingSecret}, mcp: {url,password} }`; bot create modal has the field; reveal modal shows webhook URL + MCP URL + password.
@@ -49,10 +51,11 @@
 - None.
 
 ## Next Move
-1. Optional: sync local `.env` `MCP_PASSWORD` to match prod (`2091006293`), or vice versa; re-verify after any env rotation with a redeploy.
-2. Optional cleanup: `scripts/` prune pass; README already refreshed for this feature set.
-3. On fresh `npm install`: re-apply the local next-build workarounds (nft home-glob patch + `eperm-skip.cjs`) — `vercel-build.mjs` (cloud build) needs NO patching and is self-contained.
-4. When the Atlas cluster changes (new user/password/hosts), re-derive the direct URI from `nslookup -type=SRV _mongodb._tcp.cluster0.amjzy1x.mongodb.net` + TXT record, update `.env`, run `prisma db push`, re-run the smoke.
+1. **Testnet flow (user)**: add `TESTNET_API_KEY`/`TESTNET_SECRET_KEY` to `.env` for the smoke testnet case; create keys at `testnet.bybit.com` (USDT-M), add a testnet account in the UI, bind a bot, set up cron-job.org (POST `https://web-blue-delta-17.vercel.app/api/cron`, header `x-cron-secret: <CRON_SECRET>`, every 1 minute — free tier allows it), watch `BotRun.managed` accumulate.
+2. Optional: sync local `.env` `MCP_PASSWORD` to match prod (`2091006293`), or vice versa; re-verify after any env rotation with a redeploy.
+3. Optional cleanup: `scripts/` prune pass; README already refreshed for this feature set.
+4. On fresh `npm install`: re-apply the local next-build workarounds (nft home-glob patch + `eperm-skip.cjs`) — `vercel-build.mjs` (cloud build) needs NO patching and is self-contained.
+5. When the Atlas cluster changes (new user/password/hosts), re-derive the direct URI from `nslookup -type=SRV _mongodb._tcp.cluster0.amjzy1x.mongodb.net` + TXT record, update `.env`, run `prisma db push`, re-run the smoke.
 
 ## Relevant Files
 - `apps/web/app/api/exchange-accounts/route.ts` + `[id]/route.ts` — account CRUD (session-protected).

@@ -58,6 +58,7 @@ model ExchangeAccount {
   label       String?
   apiKey      String
   apiSecret   String
+  testnet     Boolean  @default(false)
   isPrimary   Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

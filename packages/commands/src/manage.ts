@@ -233,6 +233,19 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
   return result;
 }
 
+export async function runAllBotManagement(): Promise<Array<{ botId: string; name: string; result: ManageResult } | { botId: string; name: string; error: string }>> {
+  const bots = await prisma.bot.findMany({ where: { status: 'ACTIVE', type: 'WEBHOOK' }, select: { id: true, name: true } });
+  const summaries: Array<{ botId: string; name: string; result: ManageResult } | { botId: string; name: string; error: string }> = [];
+  for (const bot of bots) {
+    try {
+      summaries.push({ botId: bot.id, name: bot.name, result: await manageBotPositions(bot.id) });
+    } catch (error) {
+      summaries.push({ botId: bot.id, name: bot.name, error: error instanceof Error ? error.message.slice(0, 300) : String(error) });
+    }
+  }
+  return summaries;
+}
+
 async function applyBreakeven(input: ManageCtx, cfg: BreakevenConfig, stateEntry: ManageState['breakeven'][string]): Promise<{ moved?: string; skipped?: string; error?: string }> {
   const long = input.position.side === 'LONG';
   const movedPct = cfg.moveAtProfitPercent / 100;

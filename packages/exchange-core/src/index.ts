@@ -1,6 +1,6 @@
 import type { ExchangeId, MarginMode, MarketType, OrderRequest, PositionSide } from '@platform/contracts';
 
-export type ExchangeCredentials = { apiKey: string; secret: string; passphrase?: string; walletAddress?: string; privateKey?: string };
+export type ExchangeCredentials = { apiKey: string; secret: string; passphrase?: string; walletAddress?: string; privateKey?: string; testnet?: boolean };
 export type ExchangeConnection = { connected: boolean; serverTime: string; permissions: string[]; accountMode?: string };
 export type Balance = { asset: string; free: string; locked: string; total: string; usdValue?: string };
 export type Position = { symbol: string; side: PositionSide; quantity: string; entryPrice: string; markPrice: string; unrealizedPnl: string; leverage: number; liquidationPrice?: string; marginMode: MarginMode };
