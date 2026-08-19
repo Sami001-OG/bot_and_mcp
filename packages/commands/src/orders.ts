@@ -74,6 +74,7 @@ export type PlaceOrderInput = {
   request: OrderRequest;
   riskContext?: Partial<Pick<RiskContextInput, 'dailyPnl' | 'weeklyPnl' | 'monthlyPnl' | 'exposure' | 'openPositions' | 'consecutiveLosses' | 'enforceMinimumNotional'>>;
   maxNotionalUsd?: string;
+  source?: Record<string, unknown>;
 };
 
 export type PlaceOrderResult = {
@@ -98,17 +99,22 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       throw new CommandError(409, 'DAILY_LOSS_LIMIT_BREACHED', `Daily loss limit reached (${dailyPnl.toFixed(4)} vs limit ${settings.dailyLossLimit})`);
     }
   }
-  const config = await getAccountConfig();
+  const accountId = request.exchangeAccountId && request.exchangeAccountId !== 'default' ? request.exchangeAccountId : undefined;
+  const config = await getAccountConfig(accountId);
   const isLeveraged = config.marketType !== 'SPOT';
   if (isLeveraged && request.marginMode && request.marginMode !== 'ISOLATED') throw new CommandError(400, 'CROSS_MARGIN_UNSUPPORTED', 'Only ISOLATED margin mode is supported');
   const marginMode: 'ISOLATED' | undefined = isLeveraged ? 'ISOLATED' : undefined;
   let market: { price: string; equity: string; maxEquity: string; precision: MarketPrecision | null };
   try {
-    market = await resolveMarketSnapshot(request.symbol, request.price);
+    market = await resolveMarketSnapshot(request.symbol, request.price, true, accountId);
   } catch (error) {
     throw new CommandError(503, 'MARKET_UNAVAILABLE', 'Could not resolve live market data for this order', {
       details: error instanceof ExchangeError ? error.code : error instanceof Error ? error.message : String(error)
     });
+  }
+  if (!request.reduceOnly && new Prisma.Decimal(market.equity).lte(0)) {
+    const quote = (request.symbol.split('/')[1] ?? 'USDT').split(':')[0] ?? 'USDT';
+    throw new CommandError(409, 'INSUFFICIENT_FUNDS', `No funds in the exchange account (${config.label}). Add ${quote} to the account before trading.`);
   }
   const precision = market.precision;
   let effective: ResolvedOrderRequest;

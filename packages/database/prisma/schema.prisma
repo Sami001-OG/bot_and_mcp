@@ -174,3 +174,17 @@ model Notification {
   createdAt DateTime @default(now())
   @@index([createdAt])
 }
+
+model MarketCache {
+  id        String   @id @map("_id") @default(auto()) @db.ObjectId
+  key       String   @unique
+  payload   Json
+  updatedAt DateTime @updatedAt
+}
+
+model BotState {
+  id        String   @id @map("_id") @default(auto()) @db.ObjectId
+  botId     String   @unique @db.ObjectId
+  state     Json
+  updatedAt DateTime @updatedAt
+}

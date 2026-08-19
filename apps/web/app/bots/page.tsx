@@ -1,6 +1,6 @@
 'use client';
 
-import { Bot, CirclePlus, Copy, Pause, Play, RefreshCw, Settings2, Square, X } from 'lucide-react';
+import { Bot, CirclePlus, Copy, Pause, Play, RefreshCw, Settings2, Square, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import AppShell, { type ShellContext } from '../components/AppShell';
 import { ApiHttpError, apiFetch, type AuthSession } from '../../lib/session';
@@ -15,6 +15,9 @@ type BotConfig = {
   takeProfits?: string[];
   requireSignalStopLoss?: boolean;
   actions?: string[];
+  dca?: { enabled: boolean; triggerDropPercent: number; stepDropPercent?: number; amountMode: 'FIXED' | 'PERCENT_EQUITY'; amount: number; maxSteps: number };
+  breakeven?: { enabled: boolean; moveAtProfitPercent: number; safeProfitPercent?: number };
+  partialTps?: { enabled: boolean; levels: Array<{ pricePercent: number; closePercent: number }> };
 };
 
 type Market = { symbol: string; base: string; quote: string; type: string; active: boolean };
@@ -35,8 +38,8 @@ type BotVersion = { id: string; version: number; config: BotConfig; checksum: st
 type BotRun = { id: string; startedAt: string; stoppedAt: string | null; status: string; metrics: Record<string, unknown> };
 type BotDetail = BotSummary & { versions: BotVersion[]; runs: BotRun[] };
 
-type CreateResult = { bot: BotSummary; webhook: { id: string; url: string; signingSecret: string } };
-type SecretReveal = { botName: string; url: string; signingSecret: string };
+type CreateResult = { bot: BotSummary; webhook: { id: string; url: string; signingSecret: string }; mcp: { url: string; password: string } };
+type SecretReveal = { botName: string; url: string; signingSecret: string; mcpUrl: string };
 
 type EditTarget = { id: string; name: string; config: BotConfig };
 
@@ -52,6 +55,10 @@ function formatTime(iso: string | null): string {
 
 function webhookUrl(id: string): string {
   return `${window.location.origin}/api/webhooks/tradingview/${id}`;
+}
+
+function botMcpUrl(botId: string): string {
+  return `${window.location.origin}/api/mcp/bots/${botId}`;
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -78,6 +85,9 @@ function formatConfig(config: BotConfig): string {
   if (config.requireSignalStopLoss) parts.push('SL required');
   const allocation = formatAllocation(config.allocation);
   if (allocation) parts.push(allocation);
+  if (config.dca?.enabled) parts.push(`DCA ${config.dca.triggerDropPercent}% x${config.dca.maxSteps}`);
+  if (config.breakeven?.enabled) parts.push(`BE @+${config.breakeven.moveAtProfitPercent}%`);
+  if (config.partialTps?.enabled) parts.push(`TP ${config.partialTps.levels.map((level) => `${level.pricePercent}:${level.closePercent}`).join('/')}`);
   return parts.join(' · ');
 }
 
@@ -274,6 +284,33 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
     config.requireSignalStopLoss = form.get('requireSignalStopLoss') === 'on';
     const actions = form.getAll('actions') as string[];
     if (actions.length > 0) config.actions = actions;
+    if (form.get('dcaEnabled') === 'on') {
+      config.dca = {
+        enabled: true,
+        triggerDropPercent: Number(form.get('dcaTriggerDropPercent')),
+        ...(Number(form.get('dcaStepDropPercent')) > 0 ? { stepDropPercent: Number(form.get('dcaStepDropPercent')) } : {}),
+        amountMode: String(form.get('dcaAmountMode')) as 'FIXED' | 'PERCENT_EQUITY',
+        amount: Number(form.get('dcaAmount')),
+        maxSteps: Number(form.get('dcaMaxSteps')),
+      };
+    }
+    if (form.get('breakevenEnabled') === 'on') {
+      config.breakeven = {
+        enabled: true,
+        moveAtProfitPercent: Number(form.get('breakevenMoveAtProfitPercent')),
+        ...(Number(form.get('breakevenSafeProfitPercent')) > 0 ? { safeProfitPercent: Number(form.get('breakevenSafeProfitPercent')) } : {}),
+      };
+    }
+    if (form.get('partialTpsEnabled') === 'on') {
+      const levels = String(form.get('partialTpLevels') ?? '')
+        .split(',')
+        .map((pair) => pair.trim())
+        .filter(Boolean)
+        .map((pair) => pair.split(':'))
+        .map(([priceRaw, closeRaw]) => ({ pricePercent: Number(priceRaw), closePercent: Number(closeRaw) }))
+        .filter((level) => Number.isFinite(level.pricePercent) && level.pricePercent > 0 && Number.isFinite(level.closePercent) && level.closePercent > 0);
+      if (levels.length > 0) config.partialTps = { enabled: true, levels };
+    }
 
     try {
       if (editTarget) {
@@ -281,11 +318,13 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
         setNotice({ tone: 'success', message: `Bot "${editTarget.name}" updated (new version created).` });
       } else {
         const name = String(form.get('name') ?? '').trim();
-        const result = await apiFetch<CreateResult>('/api/bots', session, { method: 'POST', body: { name, exchangeAccountId: selectedAccountId, config } });
+        const password = String(form.get('password') ?? '').trim();
+        const result = await apiFetch<CreateResult>('/api/bots', session, { method: 'POST', body: { name, exchangeAccountId: selectedAccountId, ...(password ? { password } : {}), config } });
         setSecretReveal({
           botName: result.bot.name,
           url: webhookUrl(result.webhook.id),
           signingSecret: result.webhook.signingSecret,
+          mcpUrl: botMcpUrl(result.bot.id),
         });
         setNotice({ tone: 'success', message: `Bot "${result.bot.name}" created and ACTIVE.` });
       }
@@ -312,6 +351,32 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
     }
   };
 
+  const deleteBot = async (bot: BotSummary) => {
+    if (!session) return;
+    if (!window.confirm(`Delete bot "${bot.name}" permanently? Its webhook endpoint, runs and versions are removed.`)) return;
+    try {
+      await apiFetch(`/api/bots/${bot.id}`, session, { method: 'DELETE' });
+      setNotice({ tone: 'success', message: `Bot "${bot.name}" deleted.` });
+      if (selected?.id === bot.id) setSelected(null);
+      await loadBots();
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not delete bot.' });
+    }
+  };
+
+  const deleteAllBots = async () => {
+    if (!session) return;
+    if (!window.confirm(`Delete ALL ${bots.length} bot(s)? Their webhook endpoints, runs and versions are removed. This cannot be undone.`)) return;
+    try {
+      const result = await apiFetch<{ deleted: number }>('/api/bots', session, { method: 'DELETE' });
+      setNotice({ tone: 'success', message: `Deleted ${result.deleted} bot(s).` });
+      setSelected(null);
+      await loadBots();
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not delete bots.' });
+    }
+  };
+
   const prefill = editTarget?.config;
 
   return (
@@ -320,9 +385,12 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
           <div>
             <p className="eyebrow">AUTOMATED TRADING</p>
             <h1>Bots</h1>
-            <p className="muted">TradingView webhook bots route signals to live exchange orders.</p>
+            <p className="muted">Webhook bots trade exclusively — signals and MCP trades only execute through ACTIVE bots.</p>
           </div>
-          <button className="primary" onClick={openCreate} type="button"><CirclePlus size={17} /> New bot</button>
+          <div className="header-actions">
+            {bots.length > 0 && <button className="secondary danger" disabled={loading} onClick={() => void deleteAllBots()} type="button"><Trash2 size={15} /> Delete all</button>}
+            <button className="primary" onClick={openCreate} type="button"><CirclePlus size={17} /> New bot</button>
+          </div>
         </header>
 
         <div className="bot-layout">
@@ -366,6 +434,7 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
                           {bot.status === 'ACTIVE' && <button className="icon-btn" onClick={() => void setBotStatus(bot, 'pause')} title="Pause" type="button"><Pause size={14} /></button>}
                           <button className="icon-btn" onClick={() => openEdit(bot)} title="Edit config" type="button"><Settings2 size={14} /></button>
                           {bot.status !== 'STOPPED' && <button className="icon-btn danger" onClick={() => void setBotStatus(bot, 'stop')} title="Stop" type="button"><Square size={14} /></button>}
+                          <button className="icon-btn danger" onClick={() => void deleteBot(bot)} title="Delete permanently" type="button"><Trash2 size={14} /></button>
                         </td>
                       </tr>
                     ))}
@@ -395,6 +464,14 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
                   </div>
                   <p className="muted small">
                     TradingView strategy alerts sent to this URL run <b>only this bot</b> · leverage {selected.config.leverage ?? '1'}x
+                  </p>
+                  <p className="eyebrow" style={{ marginTop: '0.75rem' }}>MCP ENDPOINT</p>
+                  <div className="wh-row">
+                    <code className="wh-url">{botMcpUrl(selected.id)}</code>
+                    <button className="secondary sm" onClick={() => void copyText(botMcpUrl(selected.id))} type="button"><Copy size={14} /> Copy URL</button>
+                  </div>
+                  <p className="muted small">
+                    MCP client: <code>npx mcp-remote {botMcpUrl(selected.id)}</code> — authenticate with the bot&apos;s webhook signing secret.
                   </p>
                 </div>
               )}
@@ -442,16 +519,20 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
         <div className="modal-backdrop" onMouseDown={() => setSecretReveal(null)} role="presentation">
           <section aria-modal="true" className="modal" onMouseDown={(event) => event.stopPropagation()} role="dialog">
             <div className="card-head">
-              <div><p className="eyebrow">ONE-TIME SECRET</p><h2>Webhook URL for “{secretReveal.botName}”</h2></div>
+              <div><p className="eyebrow">ONE-TIME SECRET</p><h2>Webhook &amp; MCP access for “{secretReveal.botName}”</h2></div>
               <button aria-label="Close" onClick={() => setSecretReveal(null)} type="button"><X size={18} /></button>
             </div>
-            <p className="muted small">Copy these into your TradingView strategy alert. The signing secret is shown <b>only now</b> — it cannot be retrieved later.</p>
+            <p className="muted small">Copy these into your TradingView strategy alert and MCP client. The password is shown <b>only now</b> — it signs webhooks (HMAC) and authorizes MCP.</p>
             <label className="secret-field">
               <span>Webhook URL</span>
               <div className="secret-box"><code>{secretReveal.url}</code><button className="secondary sm" onClick={() => void copyText(secretReveal.url)} type="button"><Copy size={14} /> Copy</button></div>
             </label>
             <label className="secret-field">
-              <span>Signing secret</span>
+              <span>MCP URL</span>
+              <div className="secret-box"><code>{secretReveal.mcpUrl}</code><button className="secondary sm" onClick={() => void copyText(secretReveal.mcpUrl)} type="button"><Copy size={14} /> Copy</button></div>
+            </label>
+            <label className="secret-field">
+              <span>Password (webhook HMAC secret = MCP Bearer token)</span>
               <div className="secret-box"><code>{secretReveal.signingSecret}</code><button className="secondary sm" onClick={() => void copyText(secretReveal.signingSecret)} type="button"><Copy size={14} /> Copy</button></div>
             </label>
             <div className="modal-actions">
@@ -472,6 +553,8 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
               {!editTarget && (
                 <>
                   <label>Name<input minLength={1} name="name" placeholder="e.g. btc-breakout" required /></label>
+                  <label>Webhook / MCP password<input autoComplete="new-password" minLength={12} name="password" placeholder="12+ chars — leave empty to auto-generate" type="text" /></label>
+                  <p className="muted small pad-top">This password is the webhook HMAC signing secret <b>and</b> the MCP Bearer token — shown once after creation.</p>
                   <label>
                     Exchange API (credentials)
                     <select name="exchangeAccountId" onChange={(event) => setSelectedAccountId(event.target.value)} required value={selectedAccountId}>
@@ -509,6 +592,38 @@ function BotsBody({ session, setNotice, signOut }: { session: AuthSession; setNo
                     <label key={action}><input defaultChecked={prefill?.actions?.includes(action) ?? false} name="actions" type="checkbox" value={action} /> {action}</label>
                   ))}
                 </div>
+              </fieldset>
+
+              <fieldset className="action-field">
+                <legend>DCA — average down</legend>
+                <label className="checkbox"><input defaultChecked={prefill?.dca?.enabled ?? false} name="dcaEnabled" type="checkbox" /> Automatically add to a losing position</label>
+                <div className="form-row">
+                  <label>Trigger drop %<input defaultValue={prefill?.dca?.triggerDropPercent ?? 3} min="0.1" name="dcaTriggerDropPercent" step="any" type="number" /></label>
+                  <label>Step drop % (optional)<input defaultValue={prefill?.dca?.stepDropPercent ?? ''} min="0.1" name="dcaStepDropPercent" step="any" type="number" /></label>
+                </div>
+                <div className="form-row">
+                  <label>Amount mode<select defaultValue={prefill?.dca?.amountMode ?? 'FIXED'} name="dcaAmountMode"><option value="FIXED">Fixed $ amount</option><option value="PERCENT_EQUITY">% of equity</option></select></label>
+                  <label>Amount per step<input defaultValue={prefill?.dca?.amount ?? 50} min="0.01" name="dcaAmount" step="any" type="number" /></label>
+                  <label>Max steps<input defaultValue={prefill?.dca?.maxSteps ?? 3} min="1" max="20" name="dcaMaxSteps" type="number" /></label>
+                </div>
+                <p className="muted small">Evaluated on every run: when price drops {prefill?.dca?.triggerDropPercent ?? 3}% below entry, an extra entry is added (one step per run, up to max steps).</p>
+              </fieldset>
+
+              <fieldset className="action-field">
+                <legend>Breakeven stop-loss move</legend>
+                <label className="checkbox"><input defaultChecked={prefill?.breakeven?.enabled ?? false} name="breakevenEnabled" type="checkbox" /> Move the stop loss to breakeven when in profit</label>
+                <div className="form-row">
+                  <label>Move at profit %<input defaultValue={prefill?.breakeven?.moveAtProfitPercent ?? 2} min="0.1" name="breakevenMoveAtProfitPercent" step="any" type="number" /></label>
+                  <label>Safe profit % (optional)<input defaultValue={prefill?.breakeven?.safeProfitPercent ?? ''} min="0.01" name="breakevenSafeProfitPercent" step="any" type="number" /></label>
+                </div>
+                <p className="muted small">When price moves {prefill?.breakeven?.moveAtProfitPercent ?? 2}% in favor, the stop loss moves to entry (or entry + safe profit %).</p>
+              </fieldset>
+
+              <fieldset className="action-field">
+                <legend>Partial take-profit claims</legend>
+                <label className="checkbox"><input defaultChecked={prefill?.partialTps?.enabled ?? false} name="partialTpsEnabled" type="checkbox" /> Claim a percentage of the position at each TP level</label>
+                <label>TP levels (price% : close%)<input defaultValue={prefill?.partialTps?.levels.map((level) => `${level.pricePercent}:${level.closePercent}`).join(', ') ?? ''} name="partialTpLevels" placeholder="2:30, 5:30, 10:40" type="text" /></label>
+                <p className="muted small">Comma separated, e.g. <code>2:30, 5:40, 10:30</code> closes 30% at +2%, 40% at +5%, 30% at +10%. Levels must sum to 100% or less.</p>
               </fieldset>
               <div className="modal-actions">
                 <button className="secondary" onClick={() => setCreateOpen(false)} type="button">Cancel</button>

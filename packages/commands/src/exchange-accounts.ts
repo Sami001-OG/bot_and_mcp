@@ -1,6 +1,7 @@
 import { prisma, type ExchangeAccount } from '@platform/database';
 import { decryptSecret, encryptSecret } from '@platform/security';
 import { CommandError } from './errors.js';
+import { deleteBotsByIds } from './bots.js';
 
 export type ExchangeAccountPublic = {
   id: string;
@@ -59,14 +60,20 @@ export async function createExchangeAccount(input: { exchange: string; marketTyp
   return toPublic(account);
 }
 
-export async function deleteExchangeAccount(id: string): Promise<void> {
+export async function deleteExchangeAccount(id: string, force = false): Promise<{ removedBots: number }> {
   const account = await prisma.exchangeAccount.findUnique({ where: { id } });
   if (!account) throw new CommandError(404, 'ACCOUNT_NOT_FOUND', 'Exchange account not found');
   const botCount = await prisma.bot.count({ where: { exchangeAccountId: id } });
-  if (botCount > 0) throw new CommandError(409, 'ACCOUNT_IN_USE', `Cannot delete: ${botCount} bot(s) use this account`);
+  if (botCount > 0 && !force) throw new CommandError(409, 'ACCOUNT_IN_USE', `Cannot delete: ${botCount} bot(s) use this account. Delete the bots first or force the removal.`);
+  let removedBots = 0;
+  if (botCount > 0) {
+    const bots = await prisma.bot.findMany({ where: { exchangeAccountId: id }, select: { id: true } });
+    removedBots = (await deleteBotsByIds(bots.map((bot) => bot.id))).deleted;
+  }
   await prisma.exchangeAccount.delete({ where: { id } });
   const remaining = await prisma.exchangeAccount.findFirst({ orderBy: { createdAt: 'asc' } });
   if (remaining && !remaining.isPrimary) await prisma.exchangeAccount.update({ where: { id: remaining.id }, data: { isPrimary: true } });
+  return { removedBots };
 }
 
 export async function setPrimaryAccount(id: string): Promise<ExchangeAccountPublic> {

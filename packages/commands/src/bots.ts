@@ -12,8 +12,10 @@ import { getSettings, requireTradingEnabled } from './settings.js';
 import { executeOrderNow, persistOrder, type ExecuteResult } from './execute.js';
 import { loadPolicy } from './orders.js';
 import { queueNotification } from './notifications.js';
+import { manageBotPositions, mergeManagementOverrides, type ManageResult } from './manage.js';
+import type { ManagementOverrides } from '@platform/contracts';
 
-export type CreateBotInput = { name: string; exchangeAccountId: string; config: unknown };
+export type CreateBotInput = { name: string; exchangeAccountId: string; config: unknown; password?: string };
 
 export async function createBot(input: CreateBotInput) {
   const { name, exchangeAccountId } = input;
@@ -22,7 +24,11 @@ export async function createBot(input: CreateBotInput) {
   if (!account) throw new CommandError(404, 'ACCOUNT_NOT_FOUND', 'Exchange account not found');
   const config = WebhookBotConfigSchema.parse(input.config);
   const checksum = hashToken(JSON.stringify(config));
-  const signingSecret = randomUUID();
+  const password = input.password?.trim() ?? '';
+  if (password.length > 0 && password.length < 12) {
+    throw new CommandError(400, 'PASSWORD_TOO_SHORT', "Bot password must be at least 12 characters (it authenticates the bot's webhook and MCP)");
+  }
+  const signingSecret = password.length >= 12 ? password : randomUUID();
   const endpoint = await prisma.webhookEndpoint.create({ data: { name: `${name} (bot webhook)`, signingSecret } });
   let bot: Bot | undefined;
   try {
@@ -35,7 +41,11 @@ export async function createBot(input: CreateBotInput) {
     throw error;
   }
   await prisma.botVersion.create({ data: { botId: bot.id, version: 1, config, checksum } });
-  return { bot, webhook: { id: endpoint.id, url: `POST /api/webhooks/tradingview/${endpoint.id}`, signingSecret } };
+  return {
+    bot,
+    webhook: { id: endpoint.id, url: `POST /api/webhooks/tradingview/${endpoint.id}`, signingSecret },
+    mcp: { url: `POST /api/mcp/bots/${bot.id}`, password: signingSecret },
+  };
 }
 
 export async function updateBotConfig(input: { botId: string; config: unknown }): Promise<Bot> {
@@ -50,6 +60,30 @@ export async function updateBotConfig(input: { botId: string; config: unknown })
 }
 
 export type BotStatus = 'PAUSED' | 'ACTIVE' | 'STOPPED';
+
+export async function deleteBotsByIds(ids: string[]): Promise<{ deleted: number }> {
+  if (ids.length === 0) return { deleted: 0 };
+  const bots = await prisma.bot.findMany({ where: { id: { in: ids } }, select: { id: true, webhookId: true } });
+  const botIds = bots.map((bot) => bot.id);
+  const endpointIds = bots.map((bot) => bot.webhookId).filter((id): id is string => Boolean(id));
+  if (botIds.length === 0) return { deleted: 0 };
+  await prisma.$transaction([
+    prisma.botRun.deleteMany({ where: { botId: { in: botIds } } }),
+    prisma.botVersion.deleteMany({ where: { botId: { in: botIds } } }),
+    ...(endpointIds.length > 0 ? [prisma.webhookDelivery.deleteMany({ where: { endpointId: { in: endpointIds } } })] : []),
+    ...(endpointIds.length > 0 ? [prisma.webhookEndpoint.deleteMany({ where: { id: { in: endpointIds } } })] : []),
+    prisma.bot.deleteMany({ where: { id: { in: botIds } } }),
+  ]);
+  return { deleted: botIds.length };
+}
+
+export async function deleteAllBots(accountId?: string): Promise<{ deleted: number }> {
+  const bots = await prisma.bot.findMany({
+    ...(accountId ? { where: { exchangeAccountId: accountId } } : {}),
+    select: { id: true },
+  });
+  return deleteBotsByIds(bots.map((bot) => bot.id));
+}
 
 export async function setBotStatus(input: { botId: string; status: BotStatus }): Promise<{ id: string; status: BotStatus }> {
   const { botId, status } = input;
@@ -87,6 +121,7 @@ export type BotRunResult = {
   price: string | null;
   positionSide: PositionSide | null;
   error?: string;
+  managed?: ManageResult | undefined;
 };
 
 export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signal: TradingViewSignal, policy: RiskPolicy, context: { deliveryId?: string } = {}): Promise<BotRunResult> {
@@ -100,6 +135,17 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
       runMetrics.notes = [`Circuit breaker: ${breaker.reason}`];
       await prisma.botRun.update({ where: { id: run.id }, data: { status: 'STOPPED', stoppedAt: new Date(), metrics: runMetrics as unknown as Prisma.InputJsonValue } });
       return { runId: run.id, status: 'STOPPED', orders: [], orderResults: [], skipped: [], notes: [breaker.reason], price: null, positionSide: null };
+    }
+    const overrides: ManagementOverrides = {
+      ...(signal.dca ? { dca: signal.dca } : {}),
+      ...(signal.breakeven ? { breakeven: signal.breakeven } : {}),
+      ...(signal.partialTps ? { partialTps: signal.partialTps } : {})
+    };
+    if (signal.action === 'MANAGE') {
+      const managed = await manageBotPositions(bot.id, overrides);
+      runMetrics.managed = managed as unknown as Prisma.InputJsonValue;
+      await prisma.botRun.update({ where: { id: run.id }, data: { status: 'STOPPED', stoppedAt: new Date(), metrics: runMetrics as unknown as Prisma.InputJsonValue } });
+      return { runId: run.id, status: 'STOPPED', orders: [], orderResults: [], skipped: [], notes: [], price: null, positionSide: null, managed };
     }
     let price: string | undefined;
     let equity = (await getSettings()).equity ?? '0';
@@ -138,8 +184,18 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
     runMetrics.notes = result.notes;
     runMetrics.price = price ?? null;
     runMetrics.positionSide = currentPositionSide ?? null;
+    let managed: ManageResult | undefined;
+    const effectiveConfig = mergeManagementOverrides(config, overrides);
+    if (effectiveConfig.dca?.enabled || effectiveConfig.breakeven?.enabled || effectiveConfig.partialTps?.enabled) {
+      try {
+        managed = await manageBotPositions(bot.id, overrides);
+        runMetrics.managed = managed as unknown as Prisma.InputJsonValue;
+      } catch (error) {
+        runMetrics.managedError = error instanceof Error ? error.message.slice(0, 300) : String(error);
+      }
+    }
     await prisma.botRun.update({ where: { id: run.id }, data: { status: 'STOPPED', stoppedAt: new Date(), metrics: runMetrics as unknown as Prisma.InputJsonValue } });
-    return { runId: run.id, status: 'STOPPED', orders: created, orderResults, skipped: result.skipped, notes: result.notes, price: price ?? null, positionSide: currentPositionSide ?? null };
+    return { runId: run.id, status: 'STOPPED', orders: created, orderResults, skipped: result.skipped, notes: result.notes, price: price ?? null, positionSide: currentPositionSide ?? null, managed };
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 300) : String(error);
     runMetrics.error = message;
@@ -175,8 +231,7 @@ export async function processWebhookSignal(input: { endpointId: string; rawBody:
     }
     const policy = await loadPolicy();
     const parsed = TradingViewSignalSchema.parse(signal);
-    let bots = await prisma.bot.findMany({ where: { status: 'ACTIVE', type: 'WEBHOOK', webhookId: endpoint.id } });
-    if (bots.length === 0) bots = await prisma.bot.findMany({ where: { status: 'ACTIVE', type: 'WEBHOOK' } });
+    const bots = await prisma.bot.findMany({ where: { status: 'ACTIVE', type: 'WEBHOOK', webhookId: endpoint.id } });
     if (bots.length === 0) {
       await prisma.webhookDelivery.update({ where: { id: delivery.id }, data: { status: 'DELIVERED', processedAt: new Date() } });
       return { deliveryId: delivery.id, routed: 0, failed: 0, bots: [], note: 'no ACTIVE bot for this endpoint' };
@@ -189,7 +244,7 @@ export async function processWebhookSignal(input: { endpointId: string; rawBody:
       try { config = WebhookBotConfigSchema.parse(bot.config); } catch { botResults.push({ botId: bot.id, skipped: ['Bot config failed validation'] }); continue; }
       const result = await runBotEvaluation(bot, config, parsed, policy, { deliveryId: delivery.id });
       if (result.status === 'ERROR') failed += 1; else routed += 1;
-      botResults.push({ botId: bot.id, runId: result.runId, orders: result.orders, skipped: result.skipped, notes: result.notes, price: result.price, positionSide: result.positionSide, ...(result.error ? { error: result.error } : {}) });
+      botResults.push({ botId: bot.id, runId: result.runId, status: result.status, orders: result.orders, skipped: result.skipped, notes: result.notes, price: result.price, positionSide: result.positionSide, ...(result.error ? { error: result.error } : {}), ...(result.managed ? { managed: result.managed } : {}) });
       await queueNotification({
         channel: 'bot',
         severity: result.status === 'ERROR' ? 'WARN' : 'INFO',

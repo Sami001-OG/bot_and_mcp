@@ -29,37 +29,45 @@
 - BullMQ-era rule (still applies to job ids anywhere): custom IDs **cannot contain `:`** — use `-` separators.
 
 ## Work State
-### Completed (current session — single-app refactor, E2E verified)
-- `next build` blocker fixed (nft home-glob EPERM, see workarounds above); renamed reserved-name `app/api/mcp/error.ts` → `mcp-error.ts`; added `protobufjs@^7.5.3` to web deps.
-- Per-bot exchange APIs (user directive: "every bot is created with an api, no api hardcoded"): `ExchangeAccount` model + encrypted secrets, account CRUD commands + `/api/exchange-accounts` routes, `/accounts` UI page, AppShell nav "Exchange APIs", bots create modal requires an account select, bot list/detail show bound account label, MCP `listAccounts` + `createBot(exchangeAccountId)`.
-- MongoDB: local 8.0.4 replaced by 7.0.14 replica set (rs0) with zlib journal; Prisma transactions now work.
-- **Full E2E smoke green (exit 0)** on mainnet Bybit (empty futures account): login → create account (secret encrypted at rest, keyPreview masked, secret never echoed) → enable trading → create bot bound to account → **signed webhook 202, routed=1 failed=0** → run STOPPED with correct risk skip ("Order margin exceeds available equity, Order value below minimum of $10") → MCP initialize/tools-list (22 tools)/listAccounts/listBots all pass.
-- Old multi-tenant infra removed/retired: no Redis/BullMQ, no separate API/worker, no Postgres; tunnel/cloudflared artifacts and legacy infra files (`apps/api`, `apps/worker`, `infra/`, `docker-compose.yml`, `turbo.json`, `.github/workflows` pnpm CI, Redis dumps, dev logs) are cleanup leftovers.
-- Package unit tests green: security 4, commands 5 (others unchanged from prior sessions).
-- **Vercel production deploy fixed (commit `5436dbe`)**: `/api/health` 503 "Query Engine not located" resolved — `scripts/vercel-build.mjs` now copies the Prisma engine into `apps/web/.next/server/` AND registers it in `.next/required-server-files.json` `files` (the @vercel/next builder's `requiredServerFilesManifest` loop puts registered files in the initial pseudo layer of EVERY lambda → engine mounts at `/var/task/apps/web/.next/server/` = Prisma's layout-independent search location 2). Verified live: health 200, login/accounts/bots all serve from Atlas. Atlas IP access list must allow 0.0.0.0/0 for Vercel egress (TLS `InternalError` otherwise).
+### Completed (current session — bot-only trading + DCA/breakeven/partial-TP + webhook management control, E2E + prod verified)
+- **Webhook management control** (user directive: external app will drive the webhook): `TradingViewSignalSchema` now accepts optional ephemeral `dca`/`breakeven`/`partialTps` overrides (replace saved config for that run only; presence implies enabled unless `enabled:false`; schemas `DcaOverrideSchema`/`BreakevenOverrideSchema`/`PartialTpsOverrideSchema` + `ManagementOverrides` type) and a `MANAGE` action (management-only run, no orders, `size` forbidden — `size` is now optional with a superRefine: required unless MANAGE). `mergeManagementOverrides` (pure, exported) + `manageBotPositions(botId, overrides?)` in manage.ts; `runBotEvaluation` (bots.ts) branches MANAGE early and passes overrides to the auto manage pass (runs when effective config enables any capability). Webhook delivery `bots[]` entries now include `status` + `managed`. README has 8 comprehensive signed-payload examples (entry, DCA override, breakeven+TP tuning, MANAGE tick, PARTIAL_EXIT, MOVE_STOP, CLOSE, REVERSE). Tests: commands 16, contracts 8, bot-engine 17 — all green; smoke exit 0 with override + MANAGE cases. Deployed to Vercel prod.
+- **Bot-only execution** ("no bot, no trade"): webhook signals route ONLY to the owning bot (fallback-to-all-bots removed); global MCP trade tools require `botId` (`BOT_REQUIRED` 409); per-bot MCP servers at `/api/mcp/bots/<botId>` authenticated with `Bearer <bot password>` (constantTimeEqual vs `bot.webhook.signingSecret`); trade tools injected with botId, admin tools excluded; `CommandError` mapped to MCP errors.
+- **Creator password** (user directive): `createBot` accepts `password?` (≥12 chars, else randomUUID); the password = webhook HMAC signing secret AND per-bot MCP Bearer; returned once in `{ webhook: {id,url,signingSecret}, mcp: {url,password} }`; bot create modal has the field; reveal modal shows webhook URL + MCP URL + password.
+- **Position-management capabilities** (`packages/commands/src/manage.ts`, run at the end of every bot run + MCP `manageBot` tool): **DCA** (trigger drop %, step spacing, FIXED/$ or % equity, max steps; one step per run), **breakeven SL move** (move SL to entry or entry+safe profit after X% in favor; cancels+replaces SL order, idempotent `btbr-` clientOrderId with version counter), **partial TPs** (`price%:close%` levels; market claim when level reached, resting reduce-only TAKE_PROFIT_MARKET otherwise; claimed/placed tracked, resting orders consumed on fill). State persists in new `BotState` model (Json, `botId @unique`); management orders use `source.kind: bot-manage` + `btdc-/btbr-/bttp-/btcl-` prefixes. Config fields added to `WebhookBotConfigSchema` (dca/breakeven/partialTps, all optional — backward compatible). Bots UI: three new config sections + `Delete all` + per-row hard delete; accounts page force delete (`?force=true` removes bots first; `removedBots` in response).
+- **Markets efficiency**: `packages/commands/src/markets.ts` — `fetchMarketsCached` (15-min memory TTL + `MarketCache` Mongo row, stale-on-failure); `/api/markets` and `marketPrecisionOf` read from it.
+- **No-funds alert**: `placeOrder` throws 409 `INSUFFICIENT_FUNDS` when `!reduceOnly && equity <= 0` — surfaced in UI + MCP.
+- **Delete cascade fix**: `deleteBotsByIds` now deletes `WebhookDelivery` rows before endpoints (P2014 FK violation fixed); `DELETE /api/bots` = delete all (`?accountId=` scoped), `DELETE /api/bots/[id]` = hard delete.
+- **Smoke extended & green (exit 0)** (`C:\Users\saifs\AppData\Local\Temp\opencode\smoke-web.mjs`): creator password flow, per-bot MCP init/tools(20)/wrong-password 401, no-funds alert via per-bot MCP, `manageBot` on empty account (positions 0, no errors), delete-all + force-delete account cleanup. Global MCP now 23 tools (added `manageBot`), per-bot 20.
+- **Unit tests**: commands 11 (added prefix/dcaStepDue/breakevenTarget/TP-sum-schema/config-compat tests), security 4 — all green.
+- **Deployed to Vercel prod** (`https://web-blue-delta-17.vercel.app`, aliased; build `web-h6fwi1f28-...`): health 200, MCP init 200 with 23 tools. NOTE: user reset the Vercel envs — prod `MCP_PASSWORD` is now **`2091006293`** (differs from local `.env`); env changes require a fresh `vercel deploy --prod` to take effect. Local `.env` unchanged.
+- MongoDB: Atlas `BotState`/`MarketCache` pushed; local mongod 7.0.14 restarted (died earlier) + db pushed.
+- Earlier session (superseded README-era): single-app refactor, per-bot exchange APIs, hkg1 lambda pin, `5436dbe` Prisma-engine-on-Vercel fix — all still live.
 
 ### Active
-- (none) — DB cleaned: all smoke-test artifacts dropped (`db.dropDatabase()` on Atlas `tradingbot`; 0 collections). App verified on empty DB (health 200, accounts/bots `[]`, settings auto-create on first use). NOTE: the smoke ExchangeAccount held a real Bybit API key (`LICs****iMMB`) — revoke it on Bybit if unused. Local mongod 7.0.14 still runs on 27017 as fallback (unused now).
-
+- (none) — DB clean (smoke self-cleans). All work verified: local build + smoke exit 0 + prod MCP 200/23 tools.
 ### Blocked
 - None.
 
 ## Next Move
-1. Optional cleanup: `start-public.ps1`/`tunnel-proxy.mjs` already removed; consider a `scripts/` prune pass and README refresh. AGENTS.md refresh on env changes.
-2. When the Atlas cluster changes (new user/password/hosts), re-derive the direct URI from `nslookup -type=SRV _mongodb._tcp.cluster0.amjzy1x.mongodb.net` + TXT record, update `.env`, run `prisma db push`, re-run the smoke.
+1. Optional: sync local `.env` `MCP_PASSWORD` to match prod (`2091006293`), or vice versa; re-verify after any env rotation with a redeploy.
+2. Optional cleanup: `scripts/` prune pass; README already refreshed for this feature set.
 3. On fresh `npm install`: re-apply the local next-build workarounds (nft home-glob patch + `eperm-skip.cjs`) — `vercel-build.mjs` (cloud build) needs NO patching and is self-contained.
+4. When the Atlas cluster changes (new user/password/hosts), re-derive the direct URI from `nslookup -type=SRV _mongodb._tcp.cluster0.amjzy1x.mongodb.net` + TXT record, update `.env`, run `prisma db push`, re-run the smoke.
 
 ## Relevant Files
 - `apps/web/app/api/exchange-accounts/route.ts` + `[id]/route.ts` — account CRUD (session-protected).
 - `apps/web/app/accounts/page.tsx` — Exchange APIs console (create/set-primary/delete, keyPreview, never secrets).
-- `apps/web/app/bots/page.tsx` — bot console (create modal: name + exchange API select + symbols + allocation/leverage/SL/TP/actions; list shows bound account).
-- `apps/web/app/api/mcp/tools.ts` — 22 MCP tools, account-aware (awaited `getAccountConfig`).
-- `packages/commands/src/exchange-accounts.ts`, `account.ts`, `bots.ts`, `execute.ts`, `orders.ts`, `portfolio.ts` — account-bound domain logic.
+- `apps/web/app/bots/page.tsx` — bot console (create modal: name + exchange API select + password + symbols + allocation/leverage/SL/TP/actions + DCA/breakeven/partial-TP config; list shows bound account, reveal modal with webhook/MCP URLs + password, per-bot delete, delete-all).
+- `apps/web/app/api/mcp/tools.ts` — 23 global MCP tools (`manageBot` added), account-aware (awaited `getAccountConfig`); `botToolSpecs`/`runBotTool` inject botId for per-bot servers.
+- `packages/commands/src/exchange-accounts.ts`, `account.ts`, `bots.ts`, `execute.ts`, `orders.ts`, `portfolio.ts`, `bot-trade.ts`, `markets.ts`, `manage.ts` — account-bound domain logic; `manage.ts` = DCA/breakeven/partial-TP engine (`manageBotPositions` + pure helpers `managePrefix`/`dcaStepDue`/`breakevenTarget`).
+- `packages/commands/src/manage.ts` — position-management engine, core of the DCA/breakeven/partial-TP feature; state in `BotState`, order prefixes `btdc-/btbr-/bttp-/btcl-`, `source.kind: bot-manage`.
 - `packages/security/src/index.ts` — `encryptSecret`/`decryptSecret` (AES-256-GCM, ENCRYPTION_KEY hex or base64-32), `constantTimeEqual`, `hashToken`.
 - `packages/exchange-adapters/src/index.ts` — bybit `recvWindow: 30000` + `adjustForTimeDifference: true`.
-- `packages/database/prisma/schema.prisma` — ExchangeAccount, Bot(+exchangeAccountId), OrderIntent(+exchangeAccountId), BotVersion/BotRun/WebhookEndpoint/WebhookDelivery/Notification, Settings, Position, Execution.
+- `packages/database/prisma/schema.prisma` — ExchangeAccount, Bot(+exchangeAccountId), OrderIntent(+exchangeAccountId), BotVersion/BotRun/WebhookEndpoint/WebhookDelivery/Notification, Settings, Position, Execution, BotState (botId @unique, Json), MarketCache.
+- `apps/web/app/api/mcp/tools.ts` — 23 global MCP tools (`manageBot` added), account-aware (awaited `getAccountConfig`); `botToolSpecs`/`runBotTool` inject botId for per-bot servers.
+- `apps/web/app/api/mcp/bots/[botId]/route.ts` — per-bot MCP server (Bearer bot password, `CommandError` mapping); `apps/web/app/api/mcp/server.ts` — shared handler.
 - **Vercel deploys run from the REPO ROOT** (`vercel deploy --prod` with root `.vercelignore`; never `--prebuilt` - the local prebuilt flow fails on missing filePathMap refs; never deploy from `apps/web` - rootDirectory double-appends the path).
 - **API lambdas pinned to `hkg1`** (`apps/web/vercel.json` `functions["app/api/**/route.ts"].regions`) - iad1 (US) gets 403 geo-blocked by Bybit CloudFront; hkg1 verified live (markets load). Bots create modal surfaces market-load errors with a Retry button instead of an infinite spinner.
 - `apps/web/lib/auth.ts` — SESSION_COOKIE `nx_session` (Secure in prod), `requireSession`, `checkPassword`.
-- Smoke script: `C:\Users\saifs\AppData\Local\Temp\opencode\smoke-web.mjs` (login→account→bot→signed webhook→MCP; reads creds from `.env` without echoing; expects a **fresh DB**).
+- Smoke script: `C:\Users\saifs\AppData\Local\Temp\opencode\smoke-web.mjs` (login→account→bot→signed webhook (incl. override + MANAGE cases)→MCP; reads creds from `.env` without echoing; expects a **fresh DB**).
 - Build preload: `C:\Users\saifs\AppData\Local\Temp\opencode\eperm-skip.cjs`; patched `node_modules/next/dist/compiled/@vercel/nft/index.js`.

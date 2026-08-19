@@ -89,14 +89,23 @@ function AccountsBody({ session, setNotice }: { session: AuthSession; setNotice:
     }
   };
 
-  const removeAccount = async (account: ExchangeAccount) => {
-    if (!window.confirm(`Delete ${account.label ?? account.exchange} account? This cannot be undone.`)) return;
+  const removeAccount = async (account: ExchangeAccount, force = false) => {
+    if (force) {
+      if (!window.confirm(`Delete "${account.label ?? account.exchange}" AND its ${account.botCount} bot(s)? Bots, webhook endpoints, runs and versions are removed too. This cannot be undone.`)) return;
+    } else if (!window.confirm(`Delete ${account.label ?? account.exchange} account? This cannot be undone.`)) {
+      return;
+    }
     try {
-      await apiFetch<{ ok: boolean }>(`/api/exchange-accounts/${account.id}`, session, { method: 'DELETE' });
-      setNotice({ tone: 'success', message: 'Account deleted.' });
+      const result = await apiFetch<{ ok: boolean; removedBots?: number }>(`/api/exchange-accounts/${account.id}${force ? '?force=true' : ''}`, session, { method: 'DELETE' });
+      setNotice({ tone: 'success', message: force ? `Account deleted, ${result.removedBots ?? account.botCount} bot(s) removed.` : 'Account deleted.' });
       await loadAccounts();
     } catch (error) {
-      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not delete account.' });
+      const message = error instanceof Error ? error.message : 'Could not delete account.';
+      if (!force && /ACCOUNT_IN_USE|in use/i.test(message)) {
+        setNotice({ tone: 'error', message: `${message} — delete again to remove its bots too.` });
+      } else {
+        setNotice({ tone: 'error', message });
+      }
     }
   };
 
@@ -206,7 +215,7 @@ function AccountsBody({ session, setNotice }: { session: AuthSession; setNotice:
                     </td>
                     <td>{formatTime(account.createdAt)}</td>
                     <td>
-                      <button aria-label={`Delete ${account.label ?? account.exchange}`} className="icon-button danger" disabled={account.isPrimary && account.botCount > 0} onClick={() => void removeAccount(account)} title="Delete account" type="button">
+                      <button aria-label={`Delete ${account.label ?? account.exchange}`} className="icon-button danger" onClick={() => void removeAccount(account)} title={account.botCount > 0 ? `Delete account and its ${account.botCount} bot(s)` : 'Delete account'} type="button">
                         <Trash2 size={14} />
                       </button>
                     </td>

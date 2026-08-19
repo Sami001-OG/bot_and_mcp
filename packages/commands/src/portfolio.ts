@@ -1,17 +1,9 @@
 import { prisma } from '@platform/database';
-import { ExchangeError, type MarketInfo } from '@platform/exchange-core';
+import { ExchangeError } from '@platform/exchange-core';
 import { connectToAccount, getAccountConfig } from './account.js';
+import { listExchangeMarkets } from './markets.js';
 
-export async function listExchangeMarkets(quote?: string): Promise<MarketInfo[]> {
-  const { adapter } = await connectToAccount();
-  try {
-    const markets = await adapter.getMarkets();
-    const filtered = quote ? markets.filter((market) => market.quote.toUpperCase() === quote.toUpperCase()) : markets;
-    return filtered.sort((a, b) => a.symbol.localeCompare(b.symbol));
-  } finally {
-    await adapter.disconnect().catch(() => undefined);
-  }
-}
+export { listExchangeMarkets };
 
 export async function portfolioSummary() {
   const config = await getAccountConfig();

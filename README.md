@@ -80,12 +80,13 @@ Trading API requirements on the Bybit side: enable the API key, and for futures 
 
 ## 3. Bots
 
-Bots are the automation unit: they subscribe a set of symbols to a webhook endpoint and translate incoming signals into sized, risk-checked orders with optional SL/TP brackets.
+Bots are the automation unit: they subscribe a set of symbols to a dedicated webhook endpoint and translate incoming signals into sized, risk-checked orders with optional SL/TP brackets. **Every trade runs through a bot** — a webhook signal or MCP trade without a bot is rejected.
 
 Go to **Bots** (`/bots`):
 
 - **Create bot** (New bot) — fields:
   - **Name** — any label, e.g. `btc-breakout`.
+  - **Webhook / MCP password** — optional, ≥ 12 chars, chosen by you. This **one** password is both the webhook HMAC signing secret and the per-bot MCP Bearer token. Leave empty to auto-generate. Shown once after creation.
   - **Exchange API** — the account the bot trades with (required, select from your saved accounts).
   - **Symbols** — one or more, e.g. `BTC/USDT:USDT`, `ETH/USDT:USDT` (futures format `<BASE>/<QUOTE>:<QUOTE>`). Symbols load live from Bybit's market list; if loading fails you'll see an error with a Retry button instead of an infinite spinner.
   - **Allocation mode** — how order size is derived:
@@ -99,10 +100,19 @@ Go to **Bots** (`/bots`):
   - **Take profits** — optional comma-separated prices, e.g. `100000, 110000`; each becomes a reduce-only TP bracket order.
   - **Require stop loss before entering** — when checked, signals without a `stop_loss` are skipped.
   - **Allowed signal actions** — checkbox allowlist: `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`. Signals with other actions are ignored.
+  - **Position-management capabilities** (evaluated on every bot run, and on demand via the MCP `manageBot` tool, or triggered by the webhook `MANAGE` action):
+    - **DCA — average down**: add to a losing position when price drops `triggerDropPercent`% below entry. `stepDropPercent` (optional) spaces subsequent steps further out; each step adds `amount` (fixed $ or % of equity), up to `maxSteps` steps, one step per run. Example: 3% trigger, $50 steps, 3 max → steps at −3%, −6%, −9%.
+    - **Breakeven stop-loss move**: when price moves `moveAtProfitPercent`% in favor, the stop loss is moved to entry (or `safeProfitPercent` above/below entry for longs/shorts if set). One move per position — state is tracked per bot.
+    - **Partial take-profit claims**: comma-separated `price%:close%` levels, e.g. `2:30, 5:40, 10:30`. When price reaches a level the bot closes that percentage of the position at market (or rests a reduce-only TP trigger order at the level so the claim happens when price arrives). Levels must sum to ≤ 100%.
+    - All three can be **overridden per signal** (ephemeral) or triggered on demand — see [Comprehensive examples](#comprehensive-examples-external-apps--tradingview-alerts).
 
 - **Statuses**: bots start **ACTIVE** and respond to webhook signals. Pause / Resume / Stop per bot from the list or detail view; paused/stopped bots ignore signals (their endpoint is deactivated with them).
-- **Dedicated endpoint**: creating a bot (UI or MCP) also creates a dedicated webhook endpoint named `<bot> (bot webhook)` — its URL and signing secret are shown once in the create dialog. A signal addressed to a bot's own endpoint only ever triggers that bot; a signal to a manually-created endpoint triggers every ACTIVE bot (each of which filters by symbol/action).
-- **Bot detail** shows the bound account, config version history, and **runs** — each webhook trigger produces a run row with metrics: signal action, symbol, mark price, number of orders placed, skipped (with reasons, e.g. "Order margin exceeds available equity", "Order value below minimum of $10", "Symbol X not in configured bot symbols"), and errors.
+- **Dedicated endpoints**: creating a bot (UI or MCP) creates its own webhook endpoint **and** its own MCP endpoint. The create dialog shows each once:
+  - Webhook URL `https://<host>/api/webhooks/tradingview/<endpointId>` + password (HMAC secret).
+  - MCP URL `https://<host>/api/mcp/bots/<botId>` + the same password (Bearer token). Authenticate with this URL from Claude/Cursor etc.
+  - A signal to a bot's own endpoint only ever triggers that bot. Manually-created endpoints on the Webhooks page no longer fan out to all bots — they deliver to the bot that owns them (or log `no ACTIVE bot for this endpoint`).
+- **Delete / Delete all**: every bot row has a permanent-delete action; the header has a **Delete all** button (also used internally when you force-delete an exchange account).
+- **Bot detail** shows the bound account, config version history, and **runs** — each webhook trigger produces a run row with metrics: signal action, symbol, mark price, number of orders placed, skipped (with reasons, e.g. "Order margin exceeds available equity", "Order value below minimum of $10", "Symbol X not in configured bot symbols"), the position-management pass summary (`managed`), and errors.
 
 ## 4. TradingView webhooks
 
@@ -121,17 +131,34 @@ The TradingView alert message body must be JSON with these fields:
 |---|---|---|---|
 | `exchange` | string | yes | `"bybit"` |
 | `symbol` | string | yes | e.g. `"BTC/USDT:USDT"` (uppercased) |
-| `action` | string | yes | one of `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`, `SET_LEVERAGE`, `MOVE_STOP` |
-| `size` | string | yes | **decimal string**, e.g. `"0.01"` — a JSON number `0.01` is rejected |
+| `action` | string | yes | one of `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`, `SET_LEVERAGE`, `MOVE_STOP`, `MANAGE` |
+| `size` | string | no* | **decimal string**, e.g. `"0.01"` — a JSON number `0.01` is rejected. Required for every action **except** `MANAGE` |
 | `timestamp` | string | yes | **ISO-8601 string**, e.g. `"2026-08-17T10:00:00.000Z"`; must be within ±5 minutes of server time |
 | `nonce` | string | yes | ≥ 12 chars; replaying the same `nonce` within 5 minutes is rejected |
 | `leverage` | number | no | 1–200 |
 | `stop_loss` | string | no | decimal string price |
 | `take_profit` | array of strings | no | decimal string prices, max 20 |
 | `reduce_only` | boolean | no | default false |
-| `close_percentage` | number | no | 0–100 |
+| `close_percentage` | number | no | 0–100 (used by `PARTIAL_EXIT`) |
+| `dca` | object | no | **ephemeral** DCA override for this run only (see below) |
+| `breakeven` | object | no | **ephemeral** breakeven override for this run only |
+| `partialTps` | object | no | **ephemeral** partial-TP override for this run only |
 
 Actions `SET_LEVERAGE` and `MOVE_STOP` are schema-valid but not exposed as bot action options — bots ignore them unless configured.
+
+#### Ephemeral management overrides (DCA / breakeven / partial TP)
+
+Every signal can carry `dca`, `breakeven`, and/or `partialTps` objects. When present they **replace the bot's saved config for that single run** — nothing is persisted, and the next signal falls back to the saved config. This lets an external app (or a TradingView alert) tune risk on the fly — e.g. widen DCA spacing during high volatility, tighten breakeven, or change TP levels — without touching the bot's permanent settings.
+
+- Fields are identical to the bot config (see the Bots section): `dca` = `triggerDropPercent` (0–50), `stepDropPercent` (optional), `amountMode` (`FIXED` | `PERCENT_EQUITY`), `amount`, `maxSteps` (1–20); `breakeven` = `moveAtProfitPercent` (0–100), `safeProfitPercent` (optional); `partialTps` = `levels: [{ pricePercent, closePercent }]` (closePercent sum ≤ 100).
+- Supplying an override **enables** that capability for the run (`enabled` defaults to true; set `"enabled": false` explicitly to force it off for that run).
+- Example: `"dca": { "triggerDropPercent": 6, "amountMode": "FIXED", "amount": 50, "maxSteps": 4 }` runs DCA this run with those exact params even if the bot had DCA disabled (or configured differently).
+
+#### MANAGE action
+
+A `MANAGE` signal runs **only** the position-management pass (DCA steps, breakeven SL move, partial-TP claims) — no orders are built or placed, `size` must be omitted, and it does not need to match `config.actions`. The management engine evaluates all open positions on the bot's symbols against the (possibly overridden) config. This is the perfect "tick" for an external app: send a `MANAGE` alert every N minutes to let the engine react to the market even when your strategy is not emitting trade signals.
+
+`MANAGE` respects the circuit breaker and trading toggle like any other run; the run is recorded as a normal `BotRun` with the `managed` metrics attached.
 
 **Minimal example** (`{{...}}` is TradingView alert message content):
 
@@ -164,6 +191,138 @@ Common alert scripts produce something like:
   "nonce": "{{timenow}}-{{ticker}}"
 }
 ```
+
+### Comprehensive examples (external apps / TradingView alerts)
+
+Every example below is a complete, valid signal body. Replace `timestamp` and `nonce` per alert and HMAC-sign the raw JSON string.
+
+**1. Plain entry with SL/TP bracket (most common)**
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "BTC/USDT:USDT",
+  "action": "LONG",
+  "size": "0.01",
+  "leverage": 10,
+  "stop_loss": "89000",
+  "take_profit": ["100000", "110000"],
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "b1f2a3c4d5e6"
+}
+```
+
+**2. Entry that also (ephemerally) enables DCA with custom params for this run**
+
+The saved bot config is untouched; this run DCA will trigger after a 4% drop and step every further 4%, $50 fixed per step, max 3 steps:
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "ETH/USDT:USDT",
+  "action": "LONG",
+  "size": "0.1",
+  "stop_loss": "2200",
+  "dca": { "triggerDropPercent": 4, "stepDropPercent": 4, "amountMode": "FIXED", "amount": 50, "maxSteps": 3 },
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "c2f3b4d5e6f7"
+}
+```
+
+**3. Ephemeral breakeven + partial TP tuning on an existing position**
+
+Move the stop to entry once +1% in profit (from this run's perspective) and sell 25% at +3%, 50% at +8%:
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "BTC/USDT:USDT",
+  "action": "BUY",
+  "size": "0.001",
+  "breakeven": { "moveAtProfitPercent": 1, "safeProfitPercent": 0.2 },
+  "partialTps": { "levels": [ { "pricePercent": 3, "closePercent": 25 }, { "pricePercent": 8, "closePercent": 50 } ] },
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "d3g4h5i6j7k8"
+}
+```
+
+**4. Management-only tick (no orders placed)**
+
+Force the DCA/breakeven/partial-TP engine to evaluate all open positions now — for external apps that poll the market and want the bot's auto-management to run on a timer:
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "BTC/USDT:USDT",
+  "action": "MANAGE",
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "e4h5i6j7k8l9"
+}
+```
+
+**5. Partial exit (manual TP claim) — close 25% of the open position at market**
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "BTC/USDT:USDT",
+  "action": "PARTIAL_EXIT",
+  "size": "0.001",
+  "close_percentage": 25,
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "f5i6j7k8l9m0"
+}
+```
+
+**6. Move the stop loss of the open position (breakeven-style manual move)**
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "BTC/USDT:USDT",
+  "action": "MOVE_STOP",
+  "size": "0.001",
+  "stop_loss": "95000",
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "g6j7k8l9m0n1"
+}
+```
+
+**7. Close the entire position**
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "BTC/USDT:USDT",
+  "action": "CLOSE_LONG",
+  "size": "0",
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "h7k8l9m0n1o2"
+}
+```
+
+**8. Reverse a position**
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "BTC/USDT:USDT",
+  "action": "REVERSE",
+  "size": "0.005",
+  "stop_loss": "91000",
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "i8l9m0n1o2p3"
+}
+```
+
+> [!TIP]
+> Any of the overrides in examples 2–3 combine with any action, including `MANAGE` — e.g. a `MANAGE` tick that temporarily widens DCA spacing without touching the saved config:
+>
+> ```json
+> { "exchange": "bybit", "symbol": "BTC/USDT:USDT", "action": "MANAGE",
+>   "dca": { "triggerDropPercent": 8, "amountMode": "FIXED", "amount": 25, "maxSteps": 2 },
+>   "timestamp": "2026-08-19T10:00:00.000Z", "nonce": "j9m0n1o2p3q4" }
+> ```
 
 ### Signing (required)
 
@@ -207,7 +366,7 @@ If `WEBHOOK_REQUIRE_SIGNATURE=false`, unsigned requests are accepted (do not do 
 
 | Status | Meaning |
 |---|---|
-| `202` | Accepted. Body: `{ deliveryId, routed, failed, bots: [...] }`. `routed` = bots that processed it, `failed` = bot runs that errored, `deliveryId` = the persisted `WebhookDelivery` (view deliveries on the Webhooks page). A `note` field may explain degenerate cases: `LIVE_TRADING_DISABLED` (trading toggle off — `failed: 1`) or `no ACTIVE bot for this endpoint`. |
+| `202` | Accepted. Body: `{ deliveryId, routed, failed, bots: [...] }`. `routed` = bots that processed it, `failed` = bot runs that errored, `deliveryId` = the persisted `WebhookDelivery` (view deliveries on the Webhooks page). Each `bots[]` entry: `{ botId, runId, status, orders, skipped, notes, price, positionSide, managed? }` — `managed` is present when the run executed a DCA/breakeven/partial-TP pass (always for `MANAGE`). A `note` field may explain degenerate cases: `LIVE_TRADING_DISABLED` (trading toggle off — `failed: 1`) or `no ACTIVE bot for this endpoint`. |
 | `401` | Missing/invalid signature, stale timestamp, or replayed nonce (`WEBHOOK_VERIFICATION_FAILED`). |
 | `404` / `410` | Unknown endpoint / endpoint deactivated (endpoints are deactivated when their bot is paused/stopped). |
 | `4xx/5xx` | Schema or processing errors. |
@@ -244,13 +403,17 @@ Read endpoints used by the dashboard: `/api/portfolio/summary`, `/api/portfolio/
 
 ## 8. MCP server (AI agent access)
 
-The app exposes a full MCP server over Streamable HTTP — point any MCP client at the URL and the app's own tools/commands do the trading.
+The app exposes MCP servers over Streamable HTTP — point any MCP client at the URL and the app's own tools/commands do the trading.
 
-- **URL**: `<origin>/api/mcp` (also visible in the app via `/api/settings` → `mcpUrl`)
-- **Auth**: `Authorization: Bearer <MCP_PASSWORD>` (falls back to `APP_PASSWORD` if `MCP_PASSWORD` is unset; `x-mcp-password` header also accepted). No auth → `401`.
-- **Protocol**: JSON-RPC 2.0 over streamable HTTP. Supports `initialize`, `tools/list`, `tools/call`, `ping`.
+- **Global server**: `<origin>/api/mcp` — admin + account management + read tools.
+  - **Auth**: `Authorization: Bearer <MCP_PASSWORD>` (falls back to `APP_PASSWORD` if `MCP_PASSWORD` is unset; `x-mcp-password` header also accepted). No auth → `401`.
+  - **Protocol**: JSON-RPC 2.0 over streamable HTTP. Supports `initialize`, `tools/list`, `tools/call`, `ping`.
+- **Per-bot servers**: `<origin>/api/mcp/bots/<botId>` — one per bot (see Bots page detail view for the exact URL).
+  - **Auth**: `Authorization: Bearer <bot password>` — the password you chose at bot creation (the webhook signing secret). Wrong password → `401`; unknown bot → `404`.
+  - **Tools**: everything except `listAccounts`, `createBot`, `deleteBot`; trade tools (`placeOrder`, `cancelOrder`, `closePosition`, `closeAll`, `changeLeverage`, `manageBot`) run **only on that bot's account** — no `botId` argument needed.
+  - Connect with `npx mcp-remote <origin>/api/mcp/bots/<botId>` and authenticate with the bot password.
 
-### Tools (22)
+### Tools (23)
 
 Read tools:
 
@@ -274,14 +437,15 @@ Write tools (all through the risk engine, synchronous):
 
 | Tool | What it does |
 |---|---|
-| `placeOrder` | Place a live order (`exchangeAccountId`, `symbol`, `side`, `type`, `quantity`, `price?`, `stopPrice?`, `leverage?`, `reduceOnly?`, `clientOrderId?`, `idempotencyKey?`) |
-| `cancelOrder` | Cancel an open order |
-| `closePosition` | Reduce-only market close for a symbol |
-| `closeAll` | Close every open position on the account |
-| `changeLeverage` | Set leverage for a futures instrument |
-| `createBot` | Create a webhook bot (requires `exchangeAccountId`; creates a dedicated endpoint) |
+| `placeOrder` | Place a live order **through a bot** — `botId` is required (every trade runs through a bot; on the per-bot server it's injected) |
+| `cancelOrder` | Cancel an open order of the bot account |
+| `closePosition` | Reduce-only market close for a symbol on the bot account |
+| `closeAll` | Close every open position on the bot account |
+| `changeLeverage` | Set leverage for a futures instrument on the bot account |
+| `manageBot` | Run the position-management pass: DCA, breakeven SL move, partial TP claims for the bot's open positions |
+| `createBot` | Create a webhook bot (requires `exchangeAccountId`; optional `password` ≥ 12 chars = shared webhook secret + MCP token; creates a dedicated webhook endpoint and per-bot MCP) |
 | `resumeBot` / `pauseBot` | Activate / pause a bot |
-| `deleteBot` | Soft-delete (stop) a bot |
+| `deleteBot` | Hard-delete a bot (endpoint, runs, versions) |
 
 ### Quick start
 
@@ -294,11 +458,18 @@ curl -s -X POST https://<host>/api/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"1.0"}}}'
 ```
 
-Then `tools/list` (returns all 22 specs), then `tools/call`:
+Then `tools/list` (returns all 23 specs), then `tools/call`:
 
 ```json
 { "jsonrpc": "2.0", "id": 2, "method": "tools/call",
   "params": { "name": "getPortfolio", "arguments": {} } }
+```
+
+Trade through a bot from the global server:
+
+```json
+{ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+  "params": { "name": "placeOrder", "arguments": { "botId": "<botId>", "symbol": "BTC/USDT:USDT", "side": "BUY", "type": "MARKET", "quantity": "0.001" } } }
 ```
 
 Results are returned as text content: `{ "ok": true, "tool": "...", "correlationId": "...", ...result }`.
@@ -306,7 +477,7 @@ Results are returned as text content: `{ "ok": true, "tool": "...", "correlation
 To connect Claude Desktop or any MCP client, use the **streamable HTTP** transport with a custom `Authorization: Bearer` header; Claude Code supports streamable HTTP servers directly (see [MCP docs](https://opencode.ai) for your client). The same `MCP_PASSWORD` protects the UI-less API too — keep it random and long.
 
 > [!NOTE]
-> `placeOrder` and friends execute **immediately** and cannot be revoked mid-flight; treat the MCP write tools like the manual order form. `cancelOrder` and `closeAll` are your emergency handles from an agent.
+> `placeOrder` and friends execute **immediately** and cannot be revoked mid-flight; treat the MCP write tools like the manual order form. `cancelOrder` and `closeAll` are your emergency handles from an agent. Calling a trade tool **without** `botId` on the global server fails with `BOT_REQUIRED`.
 
 ## 9. Cron maintenance endpoint
 
@@ -330,15 +501,15 @@ All routes are session-protected except the public ones noted. Responses are JSO
 | `GET` | `/api/health` | Health (DB, engine location) |
 | `GET` / `PATCH` | `/api/settings` | Risk settings (trading toggle, daily loss limit) |
 | `GET` / `POST` | `/api/exchange-accounts` | List / create accounts (create body: `label`, `exchange`, `marketType`, `apiKey`, `apiSecret`) |
-| `PATCH` / `DELETE` | `/api/exchange-accounts/[id]` | Set primary / delete (409 `ACCOUNT_IN_USE` when bots bound) |
-| `GET` / `POST` | `/api/bots` | List / create bots |
-| `PATCH` / `DELETE` | `/api/bots/[id]` | Update config / delete |
+| `PATCH` / `DELETE` | `/api/exchange-accounts/[id]` | Set primary / delete (`?force=true` also deletes bound bots; 409 `ACCOUNT_IN_USE` otherwise) |
+| `GET` / `POST` | `/api/bots` | List / create bots (create body: `name`, `exchangeAccountId`, `password?`, `config`; returns `webhook` + `mcp` access). `DELETE` = delete all bots (optionally `?accountId=`) |
+| `PATCH` / `DELETE` | `/api/bots/[id]` | Update config / hard delete |
 | `POST` | `/api/bots/[id]/[action]` | `resume` \| `pause` \| `stop` |
 | `GET` / `POST` | `/api/orders` | List / place manual order |
 | `POST` | `/api/orders/[id]/cancel` | Cancel an order |
 | `POST` | `/api/orders/emergency/close-all` | Close all positions (ungated) |
 | `GET` | `/api/orders/[id]` | Order intent detail |
-| `GET` | `/api/markets?quote=USDT` | Live Bybit markets (drives the bots symbol picker) |
+| `GET` | `/api/markets?quote=USDT` | Live Bybit markets (cached 15 min; drives the bots symbol picker) |
 | `GET` | `/api/portfolio/summary` | Equity, PnL, positions count |
 | `GET` | `/api/portfolio/pnl` | Realized PnL |
 | `GET` | `/api/portfolio/positions` | Open positions |
@@ -346,7 +517,8 @@ All routes are session-protected except the public ones noted. Responses are JSO
 | `GET` / `POST` | `/api/webhooks` | List / create endpoints (create returns `signingSecret` once) |
 | `POST` | `/api/webhooks/tradingview/[endpointId]` | **Public** — signed TradingView ingress |
 | `POST` | `/api/cron` | Maintenance (CRON_SECRET) |
-| `GET` / `POST` | `/api/mcp` | **Public** — MCP server (Bearer password) |
+| `GET` / `POST` | `/api/mcp` | **Public** — global MCP server (Bearer `MCP_PASSWORD`) |
+| `GET` / `POST` | `/api/mcp/bots/[botId]` | **Public** — per-bot MCP server (Bearer bot password) |
 | `GET` / `POST` / `DELETE` | `/api/notifications...` | Notifications list / read / unread count |
 
 ## Security model
@@ -388,14 +560,14 @@ Generate a key: `node -e "console.log(require('node:crypto').randomBytes(32).toS
 ├── packages/
 │   ├── database/              # Prisma schema + generated client (MongoDB)
 │   ├── security/              # encryptSecret/decryptSecret (AES-256-GCM), constantTimeEqual, hashToken
-│   ├── contracts/             # Zod schemas (orders, TradingView signals, webhook bot config)
+│   ├── contracts/             # Zod schemas (orders, TradingView signals, webhook bot config + DCA/breakeven/partial-TP)
 │   ├── exchange-core/         # Canonical exchange types/errors/adapter interface
 │   ├── exchange-adapters/     # ccxt Bybit adapter (recvWindow 30000, time-sync enabled)
 │   ├── trading-core/          # Order sizing, precision alignment, PnL/position math
 │   ├── risk-engine/           # evaluateOrder (risk checks), min-notional, sizing
 │   ├── bot-engine/            # Webhook strategy: buildWebhookOrders (entry + SL/TP brackets)
 │   ├── webhook/               # TradingViewVerifier (HMAC, timestamp, replay)
-│   └── commands/              # ALL domain logic: accounts, bots, orders, execute, portfolio, settings
+│   └── commands/              # ALL domain logic: accounts, bots, bot-trade, manage (DCA/breakeven/TP), markets (cached), orders, execute, portfolio, settings
 └── scripts/vercel-build.mjs   # Vercel build hook (copies Prisma engine into .next)
 ```
 
@@ -403,7 +575,8 @@ All packages are bundled into the `.next` build — after editing a package you 
 
 ## Architecture and data model
 
-- **Persistence**: MongoDB, single database `tradingbot`. Prisma models: `ExchangeAccount` (encrypted `apiSecret`, `isPrimary`), `Bot` (bound `exchangeAccountId`, JSON config, versions), `BotRun` (metrics), `OrderIntent` (exchangeAccountId + `source` records origin: webhook/MCP/manual), `Execution`, `Position`, `WebhookEndpoint` (+ encrypted signing secret), `WebhookDelivery` (nonce replay claims), `Notification`, `Settings` (kill switch, daily loss limit, equity/peak).
+- **Persistence**: MongoDB, single database `tradingbot`. Prisma models: `ExchangeAccount` (encrypted `apiSecret`, `isPrimary`), `Bot` (bound `exchangeAccountId`, JSON config, versions), `BotRun` (metrics incl. the management pass), `BotState` (per-bot DCA/breakeven/TP progress), `OrderIntent` (exchangeAccountId + `source` records origin: webhook/MCP/manual/bot-manage), `Execution`, `Position`, `WebhookEndpoint` (+ signing secret), `WebhookDelivery` (nonce replay claims), `Notification`, `Settings` (kill switch, daily loss limit, equity/peak), `MarketCache` (15-min markets cache).
+- **Position management** (`manageBotPositions`, `packages/commands/src/manage.ts`): runs automatically at the end of every bot run and on demand via the MCP `manageBot` tool. State (DCA step count, breakeven-applied flag, claimed/placed TP levels) persists per bot in `BotState`, so steps don't repeat across runs. Management orders use `btdc-`/`btbr-`/`bttp-`/`btcl-` clientOrderId prefixes and `source.kind: bot-manage`.
 - **Clock handling**: this VM drifts; the Bybit adapter always sets `recvWindow: 30000` + `adjustForTimeDifference: true` — requests fail with 10002 otherwise. Never disable.
 - **Risk pipeline** (`evaluateOrder`): trading enablement → daily-loss breaker → margin vs. equity → min-notional ($10 futures / $5 spot floor) → leverage bounds → size alignment to exchange precision (`alignAmount`/`alignPrice`, `PRECISION_REJECTED` below `amountMin`).
 - **Futures details**: `LONG`/`SHORT` map to hedged-mode `positionIdx` 1/2; SL/TP brackets are reduce-only conditional trigger orders (`orderType: Market`, `triggerPrice`, `triggerDirection`, `triggerBy: LastPrice`); only **ISOLATED** margin is accepted.

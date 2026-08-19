@@ -73,20 +73,83 @@ export const OrderRequestSchema = z.object({
 export type OrderRequest = z.infer<typeof OrderRequestSchema>;
 export type ResolvedOrderRequest = Omit<OrderRequest, 'quantity'> & { quantity: string };
 
+export const DcaOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  triggerDropPercent: z.number().positive().max(50),
+  stepDropPercent: z.number().positive().max(50).optional(),
+  amountMode: z.enum(['FIXED', 'PERCENT_EQUITY']),
+  amount: z.number().positive(),
+  maxSteps: z.number().int().min(1).max(20)
+});
+export type DcaOverride = z.infer<typeof DcaOverrideSchema>;
+
+export const BreakevenOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  moveAtProfitPercent: z.number().positive().max(100),
+  safeProfitPercent: z.number().positive().max(100).optional()
+});
+export type BreakevenOverride = z.infer<typeof BreakevenOverrideSchema>;
+
+export const PartialTpLevelSchema = z.object({
+  pricePercent: z.number().positive().max(100),
+  closePercent: z.number().positive().max(100)
+});
+export const PartialTpsOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  levels: z.array(PartialTpLevelSchema).min(1).max(10).refine((levels) => levels.reduce((sum, level) => sum + level.closePercent, 0) <= 100, { message: 'Partial TP closePercent levels must sum to 100 or less' })
+});
+export type PartialTpsOverride = z.infer<typeof PartialTpsOverrideSchema>;
+
+export type ManagementOverrides = { dca?: DcaOverride; breakeven?: BreakevenOverride; partialTps?: PartialTpsOverride };
+
 export const TradingViewSignalSchema = z.object({
   exchange: ExchangeId,
   symbol: z.string().min(3).max(40).transform((value) => value.toUpperCase()),
-  action: z.enum(['BUY', 'SELL', 'LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT', 'REVERSE', 'SET_LEVERAGE', 'MOVE_STOP', 'PARTIAL_EXIT']),
-  size: PositiveDecimalString,
+  action: z.enum(['BUY', 'SELL', 'LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT', 'REVERSE', 'SET_LEVERAGE', 'MOVE_STOP', 'PARTIAL_EXIT', 'MANAGE']),
+  size: PositiveDecimalString.optional(),
   leverage: z.number().int().min(1).max(200).optional(),
   stop_loss: PositiveDecimalString.optional(),
   take_profit: z.array(PositiveDecimalString).max(20).optional(),
   reduce_only: z.boolean().default(false),
   close_percentage: z.number().positive().max(100).optional(),
+  dca: DcaOverrideSchema.optional(),
+  breakeven: BreakevenOverrideSchema.optional(),
+  partialTps: PartialTpsOverrideSchema.optional(),
   nonce: z.string().min(12).max(128),
   timestamp: z.string().datetime()
+}).superRefine((value, ctx) => {
+  if (value.action !== 'MANAGE' && !value.size) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['size'], message: 'Size is required unless action is MANAGE' });
+  }
+  if (value.action === 'MANAGE' && value.size) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['size'], message: 'Size is not used with action MANAGE' });
+  }
 });
 export type TradingViewSignal = z.infer<typeof TradingViewSignalSchema>;
+export type TradingViewSignalAction = TradingViewSignal['action'];
+
+export const DcaConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  triggerDropPercent: z.number().positive().max(50),
+  stepDropPercent: z.number().positive().max(50).optional(),
+  amountMode: z.enum(['FIXED', 'PERCENT_EQUITY']),
+  amount: z.number().positive(),
+  maxSteps: z.number().int().min(1).max(20)
+});
+export type DcaConfig = z.infer<typeof DcaConfigSchema>;
+
+export const BreakevenConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  moveAtProfitPercent: z.number().positive().max(100),
+  safeProfitPercent: z.number().positive().max(100).optional()
+});
+export type BreakevenConfig = z.infer<typeof BreakevenConfigSchema>;
+
+export const PartialTpsConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  levels: z.array(PartialTpLevelSchema).min(1).max(10).refine((levels) => levels.reduce((sum, level) => sum + level.closePercent, 0) <= 100, { message: 'Partial TP closePercent levels must sum to 100 or less' })
+});
+export type PartialTpsConfig = z.infer<typeof PartialTpsConfigSchema>;
 
 export const WebhookBotConfigSchema = z.object({
   symbols: z.array(z.string().min(3).max(40)).min(1),
@@ -95,7 +158,10 @@ export const WebhookBotConfigSchema = z.object({
   stopLoss: PositiveDecimalString.optional(),
   takeProfits: z.array(PositiveDecimalString).max(20).optional(),
   requireSignalStopLoss: z.boolean().default(false),
-  actions: z.array(z.enum(['BUY', 'SELL', 'LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT', 'REVERSE', 'PARTIAL_EXIT'])).optional()
+  actions: z.array(z.enum(['BUY', 'SELL', 'LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT', 'REVERSE', 'PARTIAL_EXIT'])).optional(),
+  dca: DcaConfigSchema.optional(),
+  breakeven: BreakevenConfigSchema.optional(),
+  partialTps: PartialTpsConfigSchema.optional()
 });
 export type WebhookBotConfig = z.infer<typeof WebhookBotConfigSchema>;
 export type WebhookBotAction = WebhookBotConfig['actions'] extends Array<infer T> | undefined ? T : never;

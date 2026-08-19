@@ -4,6 +4,7 @@ import { ExchangeError, type ExchangeAdapter, type ExchangeConnection, type Mark
 import type { ExchangeId, MarketType } from '@platform/contracts';
 import { getSettings, updateSettings } from './settings.js';
 import { getAccountSecret, getPrimaryAccount } from './exchange-accounts.js';
+import { fetchMarketsCached } from './markets.js';
 
 export type AccountConfig = { id: string; exchange: ExchangeId; marketType: MarketType; label: string; apiKey: string; secret: string };
 
@@ -35,8 +36,8 @@ export async function connectToAccount(accountId?: string): Promise<{ adapter: E
   }
 }
 
-export async function resolveMarketSnapshot(symbol: string, requestPrice?: string, includePrecision = true): Promise<{ price: string; equity: string; maxEquity: string; precision: MarketPrecision | null }> {
-  const { adapter } = await connectToAccount();
+export async function resolveMarketSnapshot(symbol: string, requestPrice?: string, includePrecision = true, accountId?: string): Promise<{ price: string; equity: string; maxEquity: string; precision: MarketPrecision | null }> {
+  const { adapter } = await connectToAccount(accountId);
   try {
     const price = requestPrice ?? (await adapter.getPrice(symbol));
     const precision = includePrecision ? await marketPrecisionOf(adapter, symbol) : null;
@@ -64,7 +65,7 @@ export async function marketPrecisionOf(adapter: ExchangeAdapter, symbol: string
   if (hit && hit.expiresAt > Date.now()) return hit.precision;
   let precision: MarketPrecision | null = null;
   try {
-    const markets: MarketInfo[] = await adapter.getMarkets().catch(() => []);
+    const { markets } = await fetchMarketsCached().catch(() => ({ markets: [] as MarketInfo[] }));
     const match = markets.find((market) => market.symbol.toUpperCase() === symbol.toUpperCase());
     if (match) precision = { ...(match.amountStep !== undefined ? { amountStep: match.amountStep } : {}), ...(match.amountMin !== undefined ? { amountMin: match.amountMin } : {}), ...(match.priceStep !== undefined ? { priceStep: match.priceStep } : {}), ...(match.priceMin !== undefined ? { priceMin: match.priceMin } : {}) };
   } catch { /* precision is advisory; order flow continues unaligned */ }

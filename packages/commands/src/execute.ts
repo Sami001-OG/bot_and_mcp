@@ -277,10 +277,10 @@ export async function cancelOrderNow(orderId: string): Promise<{ orderId: string
 
 export type CloseAllResult = { canceled: number; cancelFailures: string[]; dbOrdersCanceled: number; positionsToClose: number; closed: number; closeFailures: string[] };
 
-export async function closeAllNow(): Promise<CloseAllResult> {
+export async function closeAllNow(accountId?: string): Promise<CloseAllResult> {
   let adapter: ExchangeAdapter | undefined;
   try {
-    const session = await connectToAccount();
+    const session = await connectToAccount(accountId);
     adapter = session.adapter;
     const openOrders = await adapter.getOrders();
     const cancelFailures: string[] = [];
@@ -302,7 +302,7 @@ export async function closeAllNow(): Promise<CloseAllResult> {
       const idempotencyKey = `close-${position.symbol}-${Date.now()}-${closed}`;
       const clientOrderId = `close-${Date.now()}-${closed}`;
       try {
-        const { order, created } = await persistOrder({ symbol: position.symbol, side: opposite, positionSide: 'BOTH', type: 'MARKET', quantity: position.quantity, reduceOnly: true, postOnly: false, clientOrderId, idempotencyKey }, { state: 'QUEUED' });
+        const { order, created } = await persistOrder({ symbol: position.symbol, side: opposite, positionSide: 'BOTH', type: 'MARKET', quantity: position.quantity, reduceOnly: true, postOnly: false, clientOrderId, idempotencyKey }, { state: 'QUEUED', ...(accountId ? { exchangeAccountId: accountId } : {}) });
         if (created) await executeOrderNow(order.id);
         closed += 1;
       } catch (error) {

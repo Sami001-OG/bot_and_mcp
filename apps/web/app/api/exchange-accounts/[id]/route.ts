@@ -19,12 +19,13 @@ export async function PATCH(_request: NextRequest, { params }: Params): Promise<
   }
 }
 
-export async function DELETE(_request: NextRequest, { params }: Params): Promise<NextResponse> {
+export async function DELETE(request: NextRequest, { params }: Params): Promise<NextResponse> {
   try {
     await requireSession();
     const { id } = await params;
-    await deleteExchangeAccount(id);
-    return NextResponse.json({ ok: true });
+    const force = request.nextUrl.searchParams.get('force') === 'true';
+    const result = await deleteExchangeAccount(id, force);
+    return NextResponse.json({ ok: true, ...result });
   } catch (error) {
     return errorResponse(error);
   }

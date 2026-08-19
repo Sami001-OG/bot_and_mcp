@@ -118,7 +118,7 @@ export function buildWebhookOrders(input: WebhookBuildInput): WebhookBuildResult
       break;
     case 'CLOSE_LONG': case 'CLOSE_SHORT': {
       const positionSide = CLOSE_POSITION[signal.action];
-      const quantity = input.positionQuantity !== undefined ? String(input.positionQuantity) : signal.size;
+      const quantity = input.positionQuantity !== undefined ? String(input.positionQuantity) : signal.size ?? '';
       close(positionSide, quantity, 'close');
       break;
     }
@@ -135,7 +135,7 @@ export function buildWebhookOrders(input: WebhookBuildInput): WebhookBuildResult
       if (input.positionQuantity === undefined || input.positionQuantity <= 0) { skipped.push('REVERSE requires a non-zero position to reverse'); break; }
       const openSide = SIDE_OF_POSITION[input.currentPositionSide];
       const openPosition = input.currentPositionSide === 'LONG' ? 'SHORT' : 'LONG';
-      const quantity = input.positionQuantity !== undefined ? String(input.positionQuantity) : signal.size;
+      const quantity = input.positionQuantity !== undefined ? String(input.positionQuantity) : signal.size ?? '';
       close(input.currentPositionSide, quantity, 'close');
       buildEntryWithBracket(openSide, openPosition);
       break;
