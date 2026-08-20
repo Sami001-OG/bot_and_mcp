@@ -687,10 +687,10 @@ node "D:\crypto_data\Trading bot mcp\node_modules\next\dist\bin\next" build
 
 ## Deployment (Vercel)
 
-The production site is deployed from this repo to Vercel:
+The production site is deployed from this repo to Vercel. The Vercel project is **connected to GitHub** — every `git push` to `main` triggers a cloud build and auto-deploys to prod:
 
-1. **From the repo root** — `node "C:\Users\saifs\AppData\Roaming\npm\node_modules\vercel\dist\vc.js" deploy --prod`. Never use `--prebuilt` (cloud assembly fails on missing filePathMap refs) and never deploy from `apps/web` (rootDirectory would double-append).
-2. **Environment** — set all vars in the Vercel project dashboard (same as `.env`; `DATABASE_URL` pointing at Atlas).
+1. **Automatic deploys** — push to `main`, Vercel builds and deploys. Manual `vercel deploy --prod` from the repo root is only needed for immediate deploys or env-var-only changes (never use `--prebuilt` — cloud assembly fails on missing filePathMap refs; never deploy from `apps/web` — rootDirectory would double-append).
+2. **Environment** — set all vars in the Vercel project dashboard (same as `.env`; `DATABASE_URL` pointing at Atlas). Env changes require a manual redeploy to take effect.
 3. **Build hook** — `scripts/vercel-build.mjs` copies the Prisma engine into `.next/server/` and registers it in `required-server-files.json` so every Lambda can find it (otherwise `/api/health` 503s with "Query Engine not located").
 4. **Region** — `apps/web/vercel.json` pins every API route to `hkg1`. Do not change: Bybit's CloudFront geo-blocks US datacenters (403), which made `/api/markets` fail from iad1.
 5. **Atlas** — the cluster's IP access list must allow `0.0.0.0/0` for Vercel egress (otherwise TLS `InternalError`). Use a direct multi-host URI (this machine's DNS refuses SRV records).
