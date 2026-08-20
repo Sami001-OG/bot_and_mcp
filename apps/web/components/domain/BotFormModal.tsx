@@ -139,7 +139,7 @@ export function BotFormModal({
     : (accounts.find((account) => account.id === selectedAccountId)?.marketType ?? undefined);
 
   return (
-    <Modal open wide eyebrow={editTarget ? 'EDIT CONFIG' : 'AUTOMATION'} title={editTarget ? `Edit ${editTarget.name}` : 'New webhook bot'} onClose={onClose}>
+    <Modal open={open} wide eyebrow={editTarget ? 'EDIT CONFIG' : 'AUTOMATION'} title={editTarget ? `Edit ${editTarget.name}` : 'New webhook bot'} onClose={onClose}>
       <form key={`${editTarget?.id ?? 'new'}:${open}`} onSubmit={persistBot}>
         {!editTarget && (
           <>
