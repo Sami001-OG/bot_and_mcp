@@ -2,62 +2,18 @@
 
 import { AlertTriangle, Bell, Bot, Boxes, Check, Layers, Power, RefreshCw, TrendingUp } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import AppShell, { type ShellContext } from '../components/AppShell';
-import { ApiHttpError, apiFetch, type AuthSession } from '../../lib/session';
-
-type LedgerPosition = {
-  symbol: string;
-  side: string;
-  quantity: string;
-  averageEntryPrice: string;
-  markPrice: string;
-  unrealizedPnl: string;
-  realizedPnl: string;
-  leverage: number;
-  liquidationPrice?: string;
-  marginMode: string;
-  updatedAt: string;
-};
-
-type RealizedRow = { symbol: string; realizedPnl: string; fills: number };
-
-type PnlResponse = {
-  since: string;
-  positions: LedgerPosition[];
-  realizedBySymbol: RealizedRow[];
-  totals: { unrealized: string; realized: string; openPositions: number; ledgerRows: number };
-  generatedAt: string;
-  live: boolean;
-};
-
-type ExecutionRow = {
-  orderId: string;
-  state: string;
-  side: string;
-  positionSide: string;
-  symbol: string;
-  marketType: string;
-  exchange: string;
-  label: string;
-  executionId: string | null;
-  quantity: string;
-  price: string;
-  fee: string;
-  feeAsset: string | null;
-  executedAt: string | null;
-  createdAt: string;
-};
-
-type AppNotification = {
-  id: string;
-  channel: string;
-  severity: string;
-  title: string;
-  message?: string | null;
-  payload?: unknown;
-  readAt: string | null;
-  createdAt: string;
-};
+import AppShell from '../../components/layout/AppShell';
+import { useApp } from '../../components/layout/AppContext';
+import { ApiHttpError, apiFetch } from '../../lib/session';
+import { formatNumber, formatPnl, formatTime, pnlClass, STATE_TONES, WINDOWS } from '../../lib/format';
+import type { AppNotification, ExecutionRow, PnlResponse } from '../../lib/types';
+import { Button } from '../../components/ui/Button';
+import { Card, CardHeader } from '../../components/ui/Card';
+import { StatusBadge } from '../../components/ui/StatusBadge';
+import { Table, Td, Th, TableScroll } from '../../components/ui/Table';
+import { TabBar, Tab } from '../../components/ui/Tabs';
+import { MetricCard } from '../../components/ui/MetricCard';
+import { EmptyState } from '../../components/ui/EmptyState';
 
 type WorkspaceRisk = {
   mcpUrl: string;
@@ -69,50 +25,16 @@ type WorkspaceRisk = {
   breakerReason: string | null;
 };
 
-const WINDOWS = [
-  { label: '24h', hours: 24 },
-  { label: '7d', hours: 7 * 24 },
-  { label: '30d', hours: 30 * 24 },
-  { label: 'All time', hours: null },
-] as const;
-
-const EXEC_STATE_TONES: Record<string, string> = { FILLED: 'ok', QUEUED: 'ok', RECEIVED: 'muted', REJECTED: 'bad', CANCELED: 'muted', FAILED: 'bad', EXPIRED: 'muted' };
-
-function formatTime(iso: string | null): string {
-  if (!iso) return '--';
-  return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
-
-function formatNumber(value: string, digits = 2): string {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return '--';
-  return amount.toLocaleString('en-US', { maximumFractionDigits: digits });
-}
-
-function formatPnl(value: string): string {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return '$0.00';
-  return `${amount >= 0 ? '+' : '-'}$${Math.abs(amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function pnlClass(value: string): string {
-  const amount = Number(value);
-  return amount > 0 ? 'profit' : amount < 0 ? 'loss' : 'muted';
-}
-
-function mcpUrl(endpoint: string): string {
-  return endpoint;
-}
-
 export default function DashboardPage() {
   return (
     <AppShell active="dashboard">
-      {({ session, setNotice, signOut }) => <DashboardBody session={session} setNotice={setNotice} signOut={signOut} />}
+      <DashboardBody />
     </AppShell>
   );
 }
 
-function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; setNotice: ShellContext['setNotice']; signOut: ShellContext['signOut'] }) {
+function DashboardBody() {
+  const { toast, signOut } = useApp();
   const [loading, setLoading] = useState(false);
   const [windowHours, setWindowHours] = useState<number | null>(7 * 24);
   const [pnl, setPnl] = useState<PnlResponse | null>(null);
@@ -126,36 +48,35 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
   const loadNotifications = useCallback(async () => {
     try {
       const [list, count] = await Promise.all([
-        apiFetch<{ notifications: AppNotification[] }>('/api/notifications', session),
-        apiFetch<{ count: number }>('/api/notifications/unread/count', session),
+        apiFetch<{ notifications: AppNotification[] }>('/api/notifications'),
+        apiFetch<{ count: number }>('/api/notifications/unread/count'),
       ]);
       setNotifications(list.notifications);
       setUnread(count.count);
     } catch {
       /* notifications are non-critical */
     }
-  }, [session]);
+  }, []);
 
   const loadWorkspaceRisk = useCallback(async () => {
     try {
-      const risk = await apiFetch<WorkspaceRisk>('/api/settings', session);
+      const risk = await apiFetch<WorkspaceRisk>('/api/settings');
       setWorkspaceRisk(risk);
       setLimitInput(risk.dailyLossLimit ?? '');
     } catch {
       /* risk panel is non-critical */
     }
-  }, [session]);
+  }, []);
 
   const toggleTrading = async (enabled: boolean) => {
     if (riskBusy) return;
-    if (!enabled && !window.confirm('Kill live trading? New orders and bot runs will be blocked. Open positions are NOT closed automatically.')) return;
     setRiskBusy(true);
     try {
-      const updated = await apiFetch<{ tradingEnabled: boolean; liveTradingAcknowledgedAt: string | null }>('/api/settings', session, { method: 'PATCH', body: { tradingEnabled: enabled } });
+      const updated = await apiFetch<{ tradingEnabled: boolean; liveTradingAcknowledgedAt: string | null }>('/api/settings', { method: 'PATCH', body: { tradingEnabled: enabled } });
       setWorkspaceRisk((risk) => (risk ? { ...risk, tradingEnabled: updated.tradingEnabled, liveTradingAcknowledgedAt: updated.liveTradingAcknowledgedAt } : risk));
-      setNotice({ tone: 'success', message: enabled ? 'Live trading resumed.' : 'Live trading KILLED — new orders and bot runs are blocked.' });
+      toast('success', enabled ? 'Live trading resumed.' : 'Live trading KILLED — new orders and bot runs are blocked.');
     } catch (error) {
-      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not toggle trading.' });
+      toast('error', error instanceof Error ? error.message : 'Could not toggle trading.');
     } finally {
       setRiskBusy(false);
     }
@@ -166,17 +87,17 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
     const value = limitInput.trim();
     const dailyLossLimit = value === '' ? null : Number(value);
     if (dailyLossLimit !== null && (!Number.isFinite(dailyLossLimit) || dailyLossLimit <= 0)) {
-      setNotice({ tone: 'error', message: 'Daily loss limit must be a positive number (empty clears it).' });
+      toast('error', 'Daily loss limit must be a positive number (empty clears it).');
       return;
     }
     setRiskBusy(true);
     try {
-      const updated = await apiFetch<{ dailyLossLimit: string | null }>('/api/settings', session, { method: 'PATCH', body: { dailyLossLimit } });
+      const updated = await apiFetch<{ dailyLossLimit: string | null }>('/api/settings', { method: 'PATCH', body: { dailyLossLimit } });
       setWorkspaceRisk((risk) => (risk ? { ...risk, dailyLossLimit: updated.dailyLossLimit } : risk));
       setLimitInput(updated.dailyLossLimit ?? '');
-      setNotice({ tone: 'success', message: dailyLossLimit === null ? 'Daily loss limit cleared.' : `Daily loss limit set to $${dailyLossLimit}.` });
+      toast('success', dailyLossLimit === null ? 'Daily loss limit cleared.' : `Daily loss limit set to $${dailyLossLimit}.`);
     } catch (error) {
-      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not update loss limit.' });
+      toast('error', error instanceof Error ? error.message : 'Could not update loss limit.');
     } finally {
       setRiskBusy(false);
     }
@@ -184,14 +105,13 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
 
   const closeAllPositions = async () => {
     if (riskBusy) return;
-    if (!window.confirm('Place market reduce-only orders to close ALL open positions? This cannot be undone by the system.')) return;
     setRiskBusy(true);
     try {
-      const result = await apiFetch<{ accepted: boolean; operation: string }>('/api/orders/emergency/close-all', session, { method: 'POST', body: {} });
-      setNotice({ tone: 'info', message: `Close-all submitted (${result.operation ?? 'ok'}).` });
+      const result = await apiFetch<{ accepted: boolean; operation: string }>('/api/orders/emergency/close-all', { method: 'POST', body: {} });
+      toast('info', `Close-all submitted (${result.operation ?? 'ok'}).`);
       await loadAll(windowHours);
     } catch (error) {
-      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not submit close-all.' });
+      toast('error', error instanceof Error ? error.message : 'Could not submit close-all.');
     } finally {
       setRiskBusy(false);
     }
@@ -203,23 +123,23 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
       const since = `${hours === null ? '2000-01-01T00:00:00.000Z' : new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()}`;
       try {
         const [pnlResponse, execResponse] = await Promise.all([
-          apiFetch<PnlResponse>(`/api/portfolio/pnl?since=${encodeURIComponent(since)}`, session),
-          apiFetch<{ executions: ExecutionRow[] }>('/api/portfolio/executions?take=60', session),
+          apiFetch<PnlResponse>(`/api/portfolio/pnl?since=${encodeURIComponent(since)}`),
+          apiFetch<{ executions: ExecutionRow[] }>('/api/portfolio/executions?take=60'),
         ]);
         setPnl(pnlResponse);
         setExecutions(execResponse.executions);
       } catch (error) {
         if (error instanceof ApiHttpError && error.status === 401) {
           signOut();
-          setNotice({ tone: 'error', message: 'Session expired — sign in again.' });
+          toast('error', 'Session expired — sign in again.');
         } else {
-          setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Failed to load dashboard data.' });
+          toast('error', error instanceof Error ? error.message : 'Failed to load dashboard data.');
         }
       } finally {
         if (!silent) setLoading(false);
       }
     },
-    [session, setNotice, signOut],
+    [toast, signOut],
   );
 
   useEffect(() => {
@@ -240,22 +160,22 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
   const markRead = async (notification: AppNotification) => {
     if (notification.readAt) return;
     try {
-      await apiFetch(`/api/notifications/${notification.id}/read`, session, { method: 'POST', body: {} });
+      await apiFetch(`/api/notifications/${notification.id}/read`, { method: 'POST', body: {} });
       setNotifications((list) => list.map((item) => (item.id === notification.id ? { ...item, readAt: new Date().toISOString() } : item)));
       setUnread((count) => Math.max(0, count - 1));
     } catch {
-      setNotice({ tone: 'info', message: 'Could not mark notification as read.' });
+      toast('info', 'Could not mark notification as read.');
     }
   };
 
   const markAllRead = async () => {
     if (unread === 0) return;
     try {
-      await apiFetch('/api/notifications/read-all', session, { method: 'POST', body: {} });
+      await apiFetch('/api/notifications/read-all', { method: 'POST', body: {} });
       setNotifications((list) => list.map((item) => (item.readAt ? item : { ...item, readAt: new Date().toISOString() })));
       setUnread(0);
     } catch {
-      setNotice({ tone: 'info', message: 'Could not mark notifications as read.' });
+      toast('info', 'Could not mark notifications as read.');
     }
   };
 
@@ -271,9 +191,9 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
           <h1>Dashboard</h1>
           <p className="muted">Realized and unrealized PnL from the fill-driven ledger, plus recent activity.</p>
         </div>
-        <button className="secondary" disabled={loading} onClick={() => void loadAll(windowHours)} type="button">
+        <Button disabled={loading} onClick={() => void loadAll(windowHours)} variant="secondary">
           <RefreshCw size={14} /> Refresh
-        </button>
+        </Button>
       </header>
 
       <div className="risk-card">
@@ -284,8 +204,8 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
           <div>
             <p>Risk controls</p>
             <h3>
-              <span className={`status-label ${workspaceRisk?.tradingEnabled ? 'ok' : 'bad'}`}>{workspaceRisk?.tradingEnabled ? 'TRADING LIVE' : 'TRADING KILLED'}</span>
-              {workspaceRisk?.breakerTripped && <span className="status-label bad">BREAKER TRIPPED</span>}
+              <StatusBadge tone={workspaceRisk?.tradingEnabled ? 'ok' : 'bad'}>{workspaceRisk?.tradingEnabled ? 'TRADING LIVE' : 'TRADING KILLED'}</StatusBadge>
+              {workspaceRisk?.breakerTripped && <StatusBadge tone="bad">BREAKER TRIPPED</StatusBadge>}
             </h3>
             <small className="muted">
               Daily realized: <b className={workspaceRisk && Number(workspaceRisk.dailyRealizedPnl) < 0 ? 'loss' : 'profit'}>{formatPnl(workspaceRisk?.dailyRealizedPnl ?? '0')}</b>
@@ -295,23 +215,23 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
         </div>
         <div className="risk-actions">
           {workspaceRisk?.tradingEnabled ? (
-            <button className="danger" disabled={riskBusy} onClick={() => void toggleTrading(false)} type="button">
+            <Button variant="danger" disabled={riskBusy} onClick={() => void toggleTrading(false)}>
               <Power size={14} /> Kill trading
-            </button>
+            </Button>
           ) : (
-            <button className="primary" disabled={riskBusy} onClick={() => void toggleTrading(true)} type="button">
+            <Button variant="primary" disabled={riskBusy} onClick={() => void toggleTrading(true)}>
               <Power size={14} /> Resume trading
-            </button>
+            </Button>
           )}
-          <button className="secondary" disabled={riskBusy} onClick={() => void closeAllPositions()} type="button">
+          <Button disabled={riskBusy} onClick={() => void closeAllPositions()} variant="secondary">
             <Layers size={14} /> Close all positions
-          </button>
+          </Button>
           <label className="limit-row">
             <span className="muted small">Daily loss limit USDT</span>
             <input onChange={(event) => setLimitInput(event.target.value)} placeholder="e.g. 50 (empty = off)" type="number" value={limitInput} />
-            <button className="secondary" disabled={riskBusy} onClick={() => void saveLossLimit()} type="button">
+            <Button disabled={riskBusy} onClick={() => void saveLossLimit()} variant="secondary">
               Set
-            </button>
+            </Button>
           </label>
         </div>
       </div>
@@ -324,139 +244,118 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
             </div>
             <div>
               <p>AI agent endpoint (MCP)</p>
-              <h3>{mcpUrl(workspaceRisk.mcpUrl)}</h3>
+              <h3>{workspaceRisk.mcpUrl}</h3>
               <small className="muted">Connect any AI agent (Claude, Cursor, opencode, etc.) to this URL — send the password as <code>Authorization: Bearer &lt;password&gt;</code>. The password is configured via the MCP_PASSWORD environment variable.</small>
             </div>
           </div>
           <div className="risk-actions">
-            <button
-              className="secondary"
+            <Button
+              variant="secondary"
               onClick={() => {
-                void navigator.clipboard?.writeText(mcpUrl(workspaceRisk.mcpUrl)).catch(() => undefined);
-                setNotice({ tone: 'success', message: 'MCP endpoint copied.' });
+                void navigator.clipboard?.writeText(workspaceRisk.mcpUrl).catch(() => undefined);
+                toast('success', 'MCP endpoint copied.');
               }}
-              type="button"
             >
               Copy link
-            </button>
+            </Button>
           </div>
         </div>
       )}
 
-      <div className="window-tabs" role="tablist" aria-label="PnL window">
+      <TabBar ariaLabel="PnL window">
         {WINDOWS.map((window) => (
-          <button
-            aria-selected={windowHours === window.hours}
-            className={windowHours === window.hours ? 'active' : ''}
-            key={window.label}
-            onClick={() => setWindowHours(window.hours)}
-            role="tab"
-            type="button"
-          >
+          <Tab key={window.label} active={windowHours === window.hours} onClick={() => setWindowHours(window.hours)}>
             {window.label}
-          </button>
+          </Tab>
         ))}
         <span className="muted small">{pnl ? `since ${formatTime(pnl.since)}` : 'loading…'}</span>
         <span className="muted small">
-          {pnl?.live ? <span className="status-label ok">LIVE</span> : <span className="status-label warn">CACHED</span>}
+          {pnl?.live ? <StatusBadge tone="ok">LIVE</StatusBadge> : <StatusBadge tone="warn">CACHED</StatusBadge>}
           {lastUpdated ? ` · updated ${lastUpdated}` : ''}
         </span>
-      </div>
+      </TabBar>
 
       <div className="grid metrics">
-        <article>
-          <div className="icon">
-            <TrendingUp size={19} />
-          </div>
-          <p>Realized PnL (window)</p>
-          <h2 className={totals ? pnlClass(totals.realized) : ''}>{totals ? formatPnl(totals.realized) : '…'}</h2>
-          <small>{pnl?.realizedBySymbol.length ?? 0} symbols settled</small>
-        </article>
-        <article>
-          <div className="icon">
-            <Layers size={19} />
-          </div>
-          <p>Unrealized PnL</p>
-          <h2 className={totals ? pnlClass(totals.unrealized) : ''}>{totals ? formatPnl(totals.unrealized) : '…'}</h2>
-          <small>{totals?.openPositions ?? 0} open positions</small>
-        </article>
-        <article>
-          <div className="icon">
-            <Boxes size={19} />
-          </div>
-          <p>Open positions</p>
-          <h2>{totals?.openPositions ?? '…'}</h2>
-          <small>{activePositions.length} active / {totals?.ledgerRows ?? 0} ledger rows</small>
-        </article>
-        <article>
-          <div className="icon">
-            <Bell size={19} />
-          </div>
-          <p>Notifications</p>
-          <h2>{unread}</h2>
-          <small>{unread === 0 ? 'all read' : 'unread'}</small>
-        </article>
+        <MetricCard
+          icon={<TrendingUp size={19} />}
+          label="Realized PnL (window)"
+          value={totals ? formatPnl(totals.realized) : '…'}
+          valueClass={totals ? pnlClass(totals.realized) : ''}
+          sub={`${pnl?.realizedBySymbol.length ?? 0} symbols settled`}
+        />
+        <MetricCard
+          icon={<Layers size={19} />}
+          label="Unrealized PnL"
+          value={totals ? formatPnl(totals.unrealized) : '…'}
+          valueClass={totals ? pnlClass(totals.unrealized) : ''}
+          sub={`${totals?.openPositions ?? 0} open positions`}
+        />
+        <MetricCard
+          icon={<Boxes size={19} />}
+          label="Open positions"
+          value={totals?.openPositions ?? '…'}
+          sub={`${activePositions.length} active / ${totals?.ledgerRows ?? 0} ledger rows`}
+        />
+        <MetricCard
+          icon={<Bell size={19} />}
+          label="Notifications"
+          value={unread}
+          sub={unread === 0 ? 'all read' : 'unread'}
+        />
       </div>
 
       <div className="grid lower">
-        <article>
-          <div className="card-head">
-            <div>
-              <p>Ledger</p>
-              <h3>Open positions & live PnL</h3>
-            </div>
-            <span className="muted small">{activePositions.length} open · {formatPnl(totals?.realized ?? '0')} realized — {formatPnl(totals?.unrealized ?? '0')} unrealized</span>
-          </div>
-          <div className="table-scroll">
-            {!loading && pnl && pnl.positions.length === 0 && <p className="muted empty">No open positions — closed positions are settled and removed from this view.</p>}
+        <Card>
+          <CardHeader
+            eyebrow="Ledger"
+            title="Open positions & live PnL"
+            right={<span className="muted small">{activePositions.length} open · {formatPnl(totals?.realized ?? '0')} realized — {formatPnl(totals?.unrealized ?? '0')} unrealized</span>}
+          />
+          <TableScroll>
+            {!loading && pnl && pnl.positions.length === 0 && <EmptyState>No open positions — closed positions are settled and removed from this view.</EmptyState>}
             {pnl && pnl.positions.length > 0 && (
-              <table>
+              <Table>
                 <thead>
                   <tr>
-                    <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Qty</th>
-                    <th>Entry</th>
-                    <th>Mark</th>
-                    <th>Realized</th>
-                    <th>Unrealized</th>
-                    <th>Lev</th>
-                    <th>Margin</th>
+                    <Th>Symbol</Th>
+                    <Th>Side</Th>
+                    <Th>Qty</Th>
+                    <Th>Entry</Th>
+                    <Th>Mark</Th>
+                    <Th>Realized</Th>
+                    <Th>Unrealized</Th>
+                    <Th>Lev</Th>
+                    <Th>Margin</Th>
                   </tr>
                 </thead>
                 <tbody>
                   {pnl.positions.map((position) => (
                     <tr key={`${position.symbol}:${position.side}`}>
-                      <td>
+                      <Td>
                         <b>{position.symbol}</b>
-                      </td>
-                      <td>
-                        <span className={`status-label ${position.side === 'SHORT' ? 'bad' : 'ok'}`}>{position.side}</span>
-                      </td>
-                      <td>{formatNumber(position.quantity)}</td>
-                      <td>{formatNumber(position.averageEntryPrice, 6)}</td>
-                      <td>{formatNumber(position.markPrice, 6)}</td>
-                      <td className={pnlClass(position.realizedPnl)}>{formatPnl(position.realizedPnl)}</td>
-                      <td className={pnlClass(position.unrealizedPnl)}>{formatPnl(position.unrealizedPnl)}</td>
-                      <td>{position.leverage}x</td>
-                      <td className="muted">{position.marginMode}</td>
+                      </Td>
+                      <Td>
+                        <StatusBadge tone={position.side === 'SHORT' ? 'bad' : 'ok'}>{position.side}</StatusBadge>
+                      </Td>
+                      <Td>{formatNumber(position.quantity)}</Td>
+                      <Td>{formatNumber(position.averageEntryPrice, 6)}</Td>
+                      <Td>{formatNumber(position.markPrice, 6)}</Td>
+                      <Td className={pnlClass(position.realizedPnl)}>{formatPnl(position.realizedPnl)}</Td>
+                      <Td className={pnlClass(position.unrealizedPnl)}>{formatPnl(position.unrealizedPnl)}</Td>
+                      <Td>{position.leverage}x</Td>
+                      <Td className="muted">{position.marginMode}</Td>
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </Table>
             )}
-          </div>
-        </article>
+          </TableScroll>
+        </Card>
 
-        <article>
-          <div className="card-head">
-            <div>
-              <p>Realized by symbol</p>
-              <h3>{pnl?.realizedBySymbol.length ?? 0} symbols</h3>
-            </div>
-          </div>
+        <Card>
+          <CardHeader eyebrow="Realized by symbol" title={`${pnl?.realizedBySymbol.length ?? 0} symbols`} />
           <div className="activity">
-            {!loading && pnl && pnl.realizedBySymbol.length === 0 && <p className="muted empty">No fills settled in this window.</p>}
+            {!loading && pnl && pnl.realizedBySymbol.length === 0 && <EmptyState>No fills settled in this window.</EmptyState>}
             {pnl?.realizedBySymbol.map((row) => (
               <p key={row.symbol}>
                 <span className={`dot ${Number(row.realizedPnl) >= 0 ? 'ok' : 'warn'}`} />
@@ -466,73 +365,65 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
               </p>
             ))}
           </div>
-        </article>
+        </Card>
       </div>
 
       <div className="grid lower">
-        <article>
-          <div className="card-head">
-            <div>
-              <p>Activity</p>
-              <h3>Order & execution history</h3>
-            </div>
-            <span className="muted small">{executions.length} rows</span>
-          </div>
-          <div className="table-scroll">
-            {!loading && executions.length === 0 && <p className="muted empty">No orders yet — place an order or trigger a bot run to record activity.</p>}
+        <Card>
+          <CardHeader eyebrow="Activity" title="Order & execution history" right={<span className="muted small">{executions.length} rows</span>} />
+          <TableScroll>
+            {!loading && executions.length === 0 && <EmptyState>No orders yet — place an order or trigger a bot run to record activity.</EmptyState>}
             {executions.length > 0 && (
-              <table>
+              <Table>
                 <thead>
                   <tr>
-                    <th>Time</th>
-                    <th>State</th>
-                    <th>Side</th>
-                    <th>Symbol</th>
-                    <th>Qty</th>
-                    <th>Price</th>
-                    <th>Fee</th>
+                    <Th>Time</Th>
+                    <Th>State</Th>
+                    <Th>Side</Th>
+                    <Th>Symbol</Th>
+                    <Th>Qty</Th>
+                    <Th>Price</Th>
+                    <Th>Fee</Th>
                   </tr>
                 </thead>
                 <tbody>
                   {executions.map((row) => (
                     <tr key={`${row.orderId}-${row.executionId ?? 'nofill'}`}>
-                      <td>{formatTime(row.executedAt ?? row.createdAt)}</td>
-                      <td>
-                        <span className={`status-label ${EXEC_STATE_TONES[row.state] ?? 'muted'}`}>{row.state}</span>
-                      </td>
-                      <td>
+                      <Td>{formatTime(row.executedAt ?? row.createdAt)}</Td>
+                      <Td>
+                        <StatusBadge tone={STATE_TONES[row.state] ?? 'muted'}>{row.state}</StatusBadge>
+                      </Td>
+                      <Td>
                         <span className={row.side === 'BUY' ? 'long' : 'short'}>{row.side}</span>
                         {row.positionSide !== 'BOTH' && <small className="muted block">{row.positionSide}</small>}
-                      </td>
-                      <td>
+                      </Td>
+                      <Td>
                         <b>{row.symbol}</b>
                         {row.marketType && <small className="muted block">{row.marketType === 'SPOT' ? 'Spot' : 'Futures'}</small>}
-                      </td>
-                      <td>{formatNumber(row.quantity)}</td>
-                      <td>{row.price ? formatNumber(row.price, 6) : '…'}</td>
-                      <td>{row.fee ? `${formatNumber(row.fee, 6)} ${row.feeAsset ?? ''}` : '…'}</td>
+                      </Td>
+                      <Td>{formatNumber(row.quantity)}</Td>
+                      <Td>{row.price ? formatNumber(row.price, 6) : '…'}</Td>
+                      <Td>{row.fee ? `${formatNumber(row.fee, 6)} ${row.feeAsset ?? ''}` : '…'}</Td>
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </Table>
             )}
-          </div>
-        </article>
+          </TableScroll>
+        </Card>
 
-        <article>
-          <div className="card-head">
-            <div>
-              <p>Live alerts</p>
-              <h3>
-                Notifications {unread > 0 && <span className="badge">{unread}</span>}
-              </h3>
-            </div>
-            <button className="secondary" disabled={unread === 0} onClick={() => void markAllRead()} type="button">
-              Mark all read
-            </button>
-          </div>
+        <Card>
+          <CardHeader
+            eyebrow="Live alerts"
+            title={<>Notifications {unread > 0 && <span className="badge">{unread}</span>}</>}
+            right={
+              <Button disabled={unread === 0} onClick={() => void markAllRead()} variant="secondary">
+                Mark all read
+              </Button>
+            }
+          />
           <div className="notification-list">
-            {!loading && notifications.length === 0 && <p className="muted empty">No notifications yet.</p>}
+            {!loading && notifications.length === 0 && <EmptyState>No notifications yet.</EmptyState>}
             {notifications.map((notification) => (
               <div className={`notification-item ${notification.readAt ? '' : 'unread'}`} key={notification.id}>
                 <div className="notification-head">
@@ -549,7 +440,7 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
               </div>
             ))}
           </div>
-        </article>
+        </Card>
       </div>
     </>
   );

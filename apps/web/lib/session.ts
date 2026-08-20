@@ -58,7 +58,6 @@ async function unwrapError(response: Response): Promise<string> {
 
 export async function apiFetch<T>(
   path: string,
-  _session: AuthSession | null,
   options: { method?: string; body?: unknown; headers?: Record<string, string> } = {},
 ): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(options.headers ?? {}) };

@@ -1,65 +1,27 @@
-ï»¿'use client';
+'use client';
 
 import { ArrowLeftRight, Ban, Layers, RefreshCw, Send } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import AppShell, { type ShellContext } from '../components/AppShell';
-import { ApiHttpError, apiFetch, type AuthSession } from '../../lib/session';
+import AppShell from '../../components/layout/AppShell';
+import { useApp } from '../../components/layout/AppContext';
+import { ApiHttpError, apiFetch } from '../../lib/session';
+import { formatNumber, formatTime, MARKET_MODES, ORDER_TYPES, POSITION_SIDES, SIDES, SPOT_ORDER_TYPES, ALLOCATION_MODES, STATE_TONES, TERMINAL_STATES, type MarketMode } from '../../lib/format';
+import type { Balance, Market, OrderRow, PlaceResult } from '../../lib/types';
+import { Button } from '../../components/ui/Button';
+import { Card, CardHeader } from '../../components/ui/Card';
+import { StatusBadge } from '../../components/ui/StatusBadge';
+import { Table, Td, Th, TableScroll } from '../../components/ui/Table';
+import { Tab, TabBar } from '../../components/ui/Tabs';
+import { EmptyState } from '../../components/ui/EmptyState';
 
-type Market = { symbol: string; base: string; quote: string; type: string; active: boolean };
-type Balance = { asset: string; free: string; locked: string; total: string };
-
-type Execution = { id: string; exchangeExecutionId: string | null; quantity: string; price: string; fee: string; feeAsset: string | null; executedAt: string | null };
-type OrderRow = {
-  id: string;
-  state: string;
-  side: string;
-  positionSide: string;
-  symbol: string;
-  orderType: string;
-  marketType: string;
-  quantity: string;
-  price: string | null;
-  stopPrice: string | null;
-  reduceOnly: boolean;
-  rejectionReason: string | null;
-  createdAt: string;
-  executions: Execution[];
-};
-
-type PlaceResult = { accepted: boolean; order: { id: string; state: string; symbol: string; side: string; quantity: string }; marketPrice?: string; sized?: { quantity: string; notional: string; leverage?: number }; execution?: { state: string; exchangeOrderId?: string; filled?: number; error?: string }; duplicate?: boolean };
-
-const ORDER_TYPES = ['MARKET', 'LIMIT', 'STOP', 'STOP_MARKET', 'STOP_LIMIT', 'TAKE_PROFIT', 'TAKE_PROFIT_MARKET', 'TRAILING_STOP'] as const;
-const SPOT_ORDER_TYPES = ['MARKET', 'LIMIT', 'STOP', 'STOP_MARKET', 'STOP_LIMIT', 'TAKE_PROFIT', 'TAKE_PROFIT_MARKET'] as const;
-const POSITION_SIDES = ['LONG', 'SHORT'] as const;
-const SIDES = ['BUY', 'SELL'] as const;
-const ALLOCATION_MODES = ['FIXED_AMOUNT', 'PERCENT_EQUITY', 'PERCENT_MAX_EQUITY', 'RISK_PERCENT'] as const;
-const MARKET_MODES = [
-  { id: 'SPOT', label: 'Spot', hint: 'Buy / sell tokens. No leverage.' },
-  { id: 'USDT_FUTURES', label: 'Futures', hint: 'Leveraged positions with long / short.' },
-] as const;
-type MarketMode = (typeof MARKET_MODES)[number]['id'];
-
-const TERMINAL_STATES = new Set(['FILLED', 'REJECTED', 'CANCELED', 'FAILED', 'EXPIRED']);
-const STATE_TONES: Record<string, string> = { FILLED: 'ok', QUEUED: 'ok', RECEIVED: 'muted', PLACED: 'warn', OPEN: 'warn', PARTIALLY_FILLED: 'warn', REJECTED: 'bad', CANCELED: 'muted', FAILED: 'bad', EXPIRED: 'muted' };
-type OrderFilter = 'SPOT' | 'USDT_FUTURES' | 'ALL';
-type StatusFilter = 'open' | 'closed' | 'all';
-
-const ORDER_FILTERS: Array<{ id: OrderFilter; label: string }> = [
+const ORDER_FILTERS: Array<{ id: 'SPOT' | 'USDT_FUTURES' | 'ALL'; label: string }> = [
   { id: 'ALL', label: 'All markets' },
   { id: 'USDT_FUTURES', label: 'Futures' },
   { id: 'SPOT', label: 'Spot' },
 ];
 
-function formatTime(iso: string | null): string {
-  if (!iso) return 'â€”';
-  return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
-
-function formatNumber(value: string, digits = 6): string {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return 'â€”';
-  return amount.toLocaleString('en-US', { maximumFractionDigits: digits });
-}
+type OrderFilter = (typeof ORDER_FILTERS)[number]['id'];
+type StatusFilter = 'open' | 'closed' | 'all';
 
 function needsPrice(type: string): boolean {
   return type === 'LIMIT' || type === 'STOP_LIMIT' || type === 'TAKE_PROFIT' || type === 'TRAILING_STOP';
@@ -72,16 +34,16 @@ function needsStop(type: string): boolean {
 export default function OrdersPage() {
   return (
     <AppShell active="orders">
-      {({ session, setNotice, signOut }) => <OrdersBody session={session} setNotice={setNotice} signOut={signOut} />}
+      <OrdersBody />
     </AppShell>
   );
 }
 
-function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; setNotice: ShellContext['setNotice']; signOut: ShellContext['signOut'] }) {
+function OrdersBody() {
+  const { toast, signOut } = useApp();
   const [markets, setMarkets] = useState<Market[] | null>(null);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [loadingOrders, setLoadingOrders] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
   const [orderFilter, setOrderFilter] = useState<OrderFilter>('ALL');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
@@ -103,40 +65,43 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
 
   const loadMarkets = useCallback(async () => {
     try {
-      const data = await apiFetch<{ symbols: Market[] }>('/api/markets?quote=USDT', session);
+      const data = await apiFetch<{ symbols: Market[] }>('/api/markets?quote=USDT');
       setMarkets(data.symbols);
     } catch {
       setMarkets([]);
     }
-  }, [session]);
+  }, []);
 
   const loadSpotBalances = useCallback(async () => {
     try {
-      const data = await apiFetch<{ balances: Balance[] }>('/api/portfolio/summary?marketType=SPOT', session);
+      const data = await apiFetch<{ balances: Balance[] }>('/api/portfolio/summary?marketType=SPOT');
       setSpotBalances(data.balances ?? []);
       setSpotBalancesError(false);
     } catch {
       setSpotBalances(null);
       setSpotBalancesError(true);
     }
-  }, [session]);
+  }, []);
 
-  const loadOrders = useCallback(async (silent = false) => {
-    if (!silent) setLoadingOrders(true);
-    try {
-      const data = await apiFetch<{ orders: OrderRow[] }>('/api/orders', session);
-      setOrders(data.orders);
-    } catch (error) {
-      if (error instanceof ApiHttpError && error.status === 401) {
-        signOut();
-        setNotice({ tone: 'error', message: 'Session expired â€” sign in again.' });
-      } else {
-        setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Failed to load orders.' });
+  const loadOrders = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoadingOrders(true);
+      try {
+        const data = await apiFetch<{ orders: OrderRow[] }>('/api/orders');
+        setOrders(data.orders);
+      } catch (error) {
+        if (error instanceof ApiHttpError && error.status === 401) {
+          signOut();
+          toast('error', 'Session expired — sign in again.');
+        } else {
+          toast('error', error instanceof Error ? error.message : 'Failed to load orders.');
+        }
+      } finally {
+        if (!silent) setLoadingOrders(false);
       }
-    } finally {
-      if (!silent) setLoadingOrders(false);
-    }
-  }, [session, setNotice, signOut]);
+    },
+    [toast, signOut],
+  );
 
   useEffect(() => {
     void loadMarkets();
@@ -176,15 +141,15 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
     const hasQuantity = sizing === 'quantity' && quantity.trim() !== '';
     const hasAllocation = sizing === 'allocation' && allocationValue.trim() !== '';
     if (!hasQuantity && !hasAllocation) {
-      setNotice({ tone: 'error', message: 'Provide a quantity or an allocation amount/percent.' });
+      toast('error', 'Provide a quantity or an allocation amount/percent.');
       return;
     }
     if (needsPrice(type) && !price.trim()) {
-      setNotice({ tone: 'error', message: `${type} orders require a limit price.` });
+      toast('error', `${type} orders require a limit price.`);
       return;
     }
     if (needsStop(type) && !stopPrice.trim()) {
-      setNotice({ tone: 'error', message: `${type} orders require a stop/trigger price.` });
+      toast('error', `${type} orders require a stop/trigger price.`);
       return;
     }
     setSubmitting(true);
@@ -211,48 +176,48 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
       const leverageNumber = Number(leverage);
       if (isFutures && leverageNumber >= 1 && leverageNumber <= 200) body.leverage = leverageNumber;
 
-      const result = await apiFetch<PlaceResult>('/api/orders', session, {
+      const result = await apiFetch<PlaceResult>('/api/orders', {
         method: 'POST',
         body,
       });
       if (!result.accepted) {
-        setNotice({ tone: 'error', message: `Order rejected (${result.order.state}) â€” likely a duplicate idempotency key.` });
+        toast('error', `Order rejected (${result.order.state}) — likely a duplicate idempotency key.`);
       } else {
-        const executionNote = result.execution?.error ? ` Â· ${result.execution.error}` : '';
-        const sizingNote = result.sized ? ` Â· ${result.sized.quantity} @ ${result.marketPrice ?? '?'} (${result.sized.notional} USDT${result.sized.leverage ? `, ${result.sized.leverage}x` : ''})` : '';
-        setNotice({ tone: 'success', message: `Order ${result.order.state} â€” ${effectiveSide} ${sizing === 'quantity' ? quantity : `${allocationMode} ${allocationValue}`} ${symbol}${sizingNote}${executionNote}.` });
+        const executionNote = result.execution?.error ? ` · ${result.execution.error}` : '';
+        const sizingNote = result.sized ? ` · ${result.sized.quantity} @ ${result.marketPrice ?? '?'} (${result.sized.notional} USDT${result.sized.leverage ? `, ${result.sized.leverage}x` : ''})` : '';
+        toast('success', `Order ${result.order.state} — ${effectiveSide} ${sizing === 'quantity' ? quantity : `${allocationMode} ${allocationValue}`} ${symbol}${sizingNote}${executionNote}.`);
       }
       setQuantity('');
       setAllocationValue('');
       await loadOrders();
     } catch (error) {
-      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Order placement failed.' });
+      toast('error', error instanceof Error ? error.message : 'Order placement failed.');
     } finally {
       setSubmitting(false);
     }
   };
 
   const cancelOrder = async (order: OrderRow) => {
-    if (!window.confirm(`Cancel ${order.symbol} ${order.side} ${order.orderType}?`)) return;
     try {
-      const result = await apiFetch<{ orderId: string; state: string }>(`/api/orders/${order.id}/cancel`, session, { method: 'POST', body: {} });
-      setNotice({ tone: 'info', message: `Cancel result: ${result.state} for ${order.symbol} ${order.side}.` });
+      const result = await apiFetch<{ orderId: string; state: string }>(`/api/orders/${order.id}/cancel`, { method: 'POST', body: {} });
+      toast('info', `Cancel result: ${result.state} for ${order.symbol} ${order.side}.`);
       await loadOrders();
     } catch (error) {
-      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Cancel failed.' });
+      toast('error', error instanceof Error ? error.message : 'Cancel failed.');
     }
   };
 
   const closeAll = async () => {
-    if (!window.confirm('Cancel all open orders and place market reduce-only orders to close ALL open futures positions?')) return;
     try {
-      const result = await apiFetch<{ canceled: number; positionsToClose: number; closed: number; closeFailures: string[] }>('/api/orders/emergency/close-all', session, { method: 'POST', body: {} });
-      setNotice({ tone: 'info', message: `Close-all: canceled ${result.canceled}, closed ${result.closed}/${result.positionsToClose} positions${result.closeFailures.length > 0 ? ` Â· ${result.closeFailures.length} failed` : ''}.` });
+      const result = await apiFetch<{ canceled: number; positionsToClose: number; closed: number; closeFailures: string[] }>('/api/orders/emergency/close-all', { method: 'POST', body: {} });
+      toast('info', `Close-all: canceled ${result.canceled}, closed ${result.closed}/${result.positionsToClose} positions${result.closeFailures.length > 0 ? ` · ${result.closeFailures.length} failed` : ''}.`);
       await loadOrders();
     } catch (error) {
-      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Close-all failed.' });
+      toast('error', error instanceof Error ? error.message : 'Close-all failed.');
     }
   };
+
+  const [submitting, setSubmitting] = useState(false);
 
   const isFutures = marketMode === 'USDT_FUTURES';
   const sellDisabled = marketMode === 'SPOT' && side === 'SELL' && spotBalances !== null && !spotBalancesError && (spotHoldingBase ?? 0) <= 0;
@@ -280,27 +245,26 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
           <p className="muted">Place orders through the risk engine, or cancel and close positions.</p>
         </div>
         <div className="header-actions">
-          <button className="secondary" disabled={loadingOrders} onClick={() => void loadOrders()} type="button">
+          <Button disabled={loadingOrders} onClick={() => void loadOrders()} variant="secondary">
             <RefreshCw size={14} /> Refresh
-          </button>
+          </Button>
           {isFutures && (
-            <button className="danger" onClick={() => void closeAll()} type="button">
+            <Button onClick={() => void closeAll()} variant="danger" tone="danger">
               <Layers size={14} /> Close all
-            </button>
+            </Button>
           )}
         </div>
       </header>
 
       <div className="orders-layout">
-        <article className="order-form-card">
-          <div className="card-head">
-            <div>
-              <p>NEW ORDER</p>
-              <h3>Place on Bybit</h3>
-              <p className="muted small">One unified account trades both spot and futures.</p>
-            </div>
-            <span className="status-label warn">{isFutures ? 'FUTURES' : 'SPOT'}</span>
-          </div>
+        <Card className="order-form-card">
+          <CardHeader
+            eyebrow="NEW ORDER"
+            title="Place on Bybit"
+            right={<span className="status-label warn">{isFutures ? 'FUTURES' : 'SPOT'}</span>}
+          >
+            <p className="muted small">One unified account trades both spot and futures.</p>
+          </CardHeader>
           <div className="sizing-toggle">
             {MARKET_MODES.map((mode) => (
               <button className={marketMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => switchMode(mode.id)} type="button">
@@ -344,7 +308,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
                         disabled={disabled}
                         key={option}
                         onClick={() => (isFutures ? setPositionSide(option) : setSide(option))}
-                        title={disabled ? `You have no ${(symbol.split('/')[0] ?? '').toUpperCase()} spot balance â€” buy first` : undefined}
+                        title={disabled ? `You have no ${(symbol.split('/')[0] ?? '').toUpperCase()} spot balance — buy first` : undefined}
                         type="button"
                       >
                         {option}
@@ -366,7 +330,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
               </label>
             </div>
             <fieldset className="action-field">
-              <legend>Sizing â€” exactly one</legend>
+              <legend>Sizing — exactly one</legend>
               <div className="form-row">
                 <label>
                   Quantity
@@ -421,7 +385,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
               <div className="form-row">
                 <label>
                   Leverage
-                  <input max="200" min="1" onChange={(event) => setLeverage(event.target.value)} placeholder="1â€“200" type="number" value={leverage} />
+                  <input max="200" min="1" onChange={(event) => setLeverage(event.target.value)} placeholder="1–200" type="number" value={leverage} />
                 </label>
                 <label className="checkbox">
                   <input checked={reduceOnly} onChange={(event) => setReduceOnly(event.target.checked)} type="checkbox" /> Reduce-only close
@@ -435,64 +399,49 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
               )
             )}
             <div className="modal-actions">
-              <button className="primary" disabled={submitting || sellDisabled} type="submit">
-                <Send size={14} /> {submitting ? 'Submittingâ€¦' : isFutures ? `Place ${positionSide}` : `Place ${side}`}
-              </button>
+              <Button variant="primary" disabled={submitting || sellDisabled} type="submit">
+                <Send size={14} /> {submitting ? 'Submitting…' : isFutures ? `Place ${positionSide}` : `Place ${side}`}
+              </Button>
             </div>
           </form>
-        </article>
+        </Card>
 
-        <article>
-          <div className="card-head">
-            <div>
-              <p>ORDER BOOK</p>
-              <h3>{visibleOrders.length} shown Â· {openCount} open</h3>
-            </div>
-            <ArrowLeftRight size={16} className="muted" />
-          </div>
-          <div className="window-tabs" role="tablist" aria-label="Order market filter">
+        <Card>
+          <CardHeader
+            eyebrow="ORDER BOOK"
+            title={`${visibleOrders.length} shown · ${openCount} open`}
+            right={<ArrowLeftRight size={16} className="muted" />}
+          />
+          <TabBar ariaLabel="Order market filter">
             {ORDER_FILTERS.map((filter) => (
-              <button
-                aria-selected={orderFilter === filter.id}
-                className={orderFilter === filter.id ? 'active' : ''}
-                key={filter.id}
-                onClick={() => setOrderFilter(filter.id)}
-                role="tab"
-                type="button"
-              >
-                {filter.label}{filter.id === 'SPOT' ? ` (${spotCount})` : filter.id === 'USDT_FUTURES' ? ` (${futuresCount})` : ''}
-              </button>
+              <Tab key={filter.id} active={orderFilter === filter.id} onClick={() => setOrderFilter(filter.id)}>
+                {filter.label}
+                {filter.id === 'SPOT' ? ` (${spotCount})` : filter.id === 'USDT_FUTURES' ? ` (${futuresCount})` : ''}
+              </Tab>
             ))}
-          </div>
-          <div className="window-tabs" role="tablist" aria-label="Order status filter">
+          </TabBar>
+          <TabBar ariaLabel="Order status filter">
             {(['open', 'closed', 'all'] as StatusFilter[]).map((status) => (
-              <button
-                aria-selected={statusFilter === status}
-                className={statusFilter === status ? 'active' : ''}
-                key={status}
-                onClick={() => setStatusFilter(status)}
-                role="tab"
-                type="button"
-              >
+              <Tab key={status} active={statusFilter === status} onClick={() => setStatusFilter(status)}>
                 {status === 'open' ? 'Open' : status === 'closed' ? 'Closed' : 'All'}
-              </button>
+              </Tab>
             ))}
-          </div>
-          <div className="table-scroll">
-            {!loadingOrders && visibleOrders.length === 0 && <p className="muted empty">No orders match this filter â€” place one to see it here with executions and fees.</p>}
+          </TabBar>
+          <TableScroll>
+            {!loadingOrders && visibleOrders.length === 0 && <EmptyState>No orders match this filter — place one to see it here with executions and fees.</EmptyState>}
             {visibleOrders.length > 0 && (
-              <table>
+              <Table>
                 <thead>
                   <tr>
-                    <th>Time</th>
-                    <th>State</th>
-                    <th>Side</th>
-                    <th>Symbol</th>
-                    <th>Qty</th>
-                    <th>Price</th>
-                    <th>Fill</th>
-                    <th>Fee</th>
-                    <th>Actions</th>
+                    <Th>Time</Th>
+                    <Th>State</Th>
+                    <Th>Side</Th>
+                    <Th>Symbol</Th>
+                    <Th>Qty</Th>
+                    <Th>Price</Th>
+                    <Th>Fill</Th>
+                    <Th>Fee</Th>
+                    <Th>Actions</Th>
                   </tr>
                 </thead>
                 <tbody>
@@ -501,24 +450,24 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
                     const fees = order.executions.reduce((sum, execution) => sum + Number(execution.fee), 0);
                     return (
                       <tr key={order.id}>
-                        <td>{formatTime(order.createdAt)}</td>
-                        <td>
-                          <span className={`status-label ${STATE_TONES[order.state] ?? 'muted'}`}>{order.state}</span>
-                        </td>
-                        <td>
+                        <Td>{formatTime(order.createdAt)}</Td>
+                        <Td>
+                          <StatusBadge tone={STATE_TONES[order.state] ?? 'muted'}>{order.state}</StatusBadge>
+                        </Td>
+                        <Td>
                           <span className={order.side === 'BUY' ? 'long' : 'short'}>{order.side}</span>
                           {order.positionSide !== 'BOTH' && <small className="muted block">{order.positionSide}</small>}
-                        </td>
-                        <td>
+                        </Td>
+                        <Td>
                           <b>{order.symbol}</b>
-                          <small className="muted block">{order.orderType}{order.reduceOnly ? ' Â· RO' : ''}</small>
+                          <small className="muted block">{order.orderType}{order.reduceOnly ? ' · RO' : ''}</small>
                           <small className="muted block">{order.marketType === 'SPOT' ? 'Spot' : 'Futures'}</small>
-                        </td>
-                        <td>{formatNumber(order.quantity)}</td>
-                        <td>{order.price ? formatNumber(order.price) : order.stopPrice ? `~${formatNumber(order.stopPrice)}` : 'â€”'}</td>
-                        <td>{filled > 0 ? formatNumber(String(filled)) : 'â€”'}</td>
-                        <td>{fees > 0 ? `${formatNumber(String(fees))} ${order.executions[0]?.feeAsset ?? ''}` : 'â€”'}</td>
-                        <td>
+                        </Td>
+                        <Td>{formatNumber(order.quantity)}</Td>
+                        <Td>{order.price ? formatNumber(order.price) : order.stopPrice ? `~${formatNumber(order.stopPrice)}` : '—'}</Td>
+                        <Td>{filled > 0 ? formatNumber(String(filled)) : '—'}</Td>
+                        <Td>{fees > 0 ? `${formatNumber(String(fees))} ${order.executions[0]?.feeAsset ?? ''}` : '—'}</Td>
+                        <Td>
                           <div className="row-actions">
                             {!TERMINAL_STATES.has(order.state) && (
                               <button className="icon-btn danger" onClick={() => void cancelOrder(order)} title="Cancel order" type="button">
@@ -526,15 +475,15 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
                               </button>
                             )}
                           </div>
-                        </td>
+                        </Td>
                       </tr>
                     );
                   })}
                 </tbody>
-              </table>
+              </Table>
             )}
-          </div>
-        </article>
+          </TableScroll>
+        </Card>
       </div>
     </>
   );
