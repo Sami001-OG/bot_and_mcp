@@ -27,6 +27,7 @@ type PnlResponse = {
   realizedBySymbol: RealizedRow[];
   totals: { unrealized: string; realized: string; openPositions: number; ledgerRows: number };
   generatedAt: string;
+  live: boolean;
 };
 
 type ExecutionRow = {
@@ -35,6 +36,7 @@ type ExecutionRow = {
   side: string;
   positionSide: string;
   symbol: string;
+  marketType: string;
   exchange: string;
   label: string;
   executionId: string | null;
@@ -187,6 +189,7 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
     try {
       const result = await apiFetch<{ accepted: boolean; operation: string }>('/api/orders/emergency/close-all', session, { method: 'POST', body: {} });
       setNotice({ tone: 'info', message: `Close-all submitted (${result.operation ?? 'ok'}).` });
+      await loadAll(windowHours);
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not submit close-all.' });
     } finally {
@@ -195,8 +198,8 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
   };
 
   const loadAll = useCallback(
-    async (hours: number | null) => {
-      setLoading(true);
+    async (hours: number | null, silent = false) => {
+      if (!silent) setLoading(true);
       const since = `${hours === null ? '2000-01-01T00:00:00.000Z' : new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()}`;
       try {
         const [pnlResponse, execResponse] = await Promise.all([
@@ -213,7 +216,7 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
           setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Failed to load dashboard data.' });
         }
       } finally {
-        setLoading(false);
+        if (!silent) setLoading(false);
       }
     },
     [session, setNotice, signOut],
@@ -223,6 +226,15 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
     void loadAll(windowHours);
     void loadNotifications();
     void loadWorkspaceRisk();
+  }, [windowHours, loadAll, loadNotifications, loadWorkspaceRisk]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void loadAll(windowHours, true);
+      void loadNotifications();
+      void loadWorkspaceRisk();
+    }, 15000);
+    return () => clearInterval(timer);
   }, [windowHours, loadAll, loadNotifications, loadWorkspaceRisk]);
 
   const markRead = async (notification: AppNotification) => {
@@ -249,6 +261,7 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
 
   const totals = pnl?.totals;
   const activePositions = pnl?.positions.filter((position) => Number(position.quantity) !== 0) ?? [];
+  const lastUpdated = pnl?.generatedAt ? new Date(pnl.generatedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : null;
 
   return (
     <>
@@ -344,6 +357,10 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
           </button>
         ))}
         <span className="muted small">{pnl ? `since ${formatTime(pnl.since)}` : 'loading…'}</span>
+        <span className="muted small">
+          {pnl?.live ? <span className="status-label ok">LIVE</span> : <span className="status-label warn">CACHED</span>}
+          {lastUpdated ? ` · updated ${lastUpdated}` : ''}
+        </span>
       </div>
 
       <div className="grid metrics">
@@ -386,12 +403,12 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
           <div className="card-head">
             <div>
               <p>Ledger</p>
-              <h3>Open positions & PnL</h3>
+              <h3>Open positions & live PnL</h3>
             </div>
-            <span className="muted small">{formatPnl(totals?.realized ?? '0')} realized — {formatPnl(totals?.unrealized ?? '0')} unrealized</span>
+            <span className="muted small">{activePositions.length} open · {formatPnl(totals?.realized ?? '0')} realized — {formatPnl(totals?.unrealized ?? '0')} unrealized</span>
           </div>
           <div className="table-scroll">
-            {!loading && pnl && pnl.positions.length === 0 && <p className="muted empty">No ledger positions yet — fills are recorded as orders execute.</p>}
+            {!loading && pnl && pnl.positions.length === 0 && <p className="muted empty">No open positions — closed positions are settled and removed from this view.</p>}
             {pnl && pnl.positions.length > 0 && (
               <table>
                 <thead>
@@ -489,6 +506,7 @@ function DashboardBody({ session, setNotice, signOut }: { session: AuthSession; 
                       </td>
                       <td>
                         <b>{row.symbol}</b>
+                        {row.marketType && <small className="muted block">{row.marketType === 'SPOT' ? 'Spot' : 'Futures'}</small>}
                       </td>
                       <td>{formatNumber(row.quantity)}</td>
                       <td>{row.price ? formatNumber(row.price, 6) : '…'}</td>

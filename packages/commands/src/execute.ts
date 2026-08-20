@@ -24,6 +24,10 @@ export async function updatePositionLedger(order: OrderIntent, quantity: string,
   const base: PositionSnapshot = existing ? { side: existing.side as PositionSnapshot['side'], quantity: existing.quantity, averageEntryPrice: existing.averageEntryPrice, realizedPnl: existing.realizedPnl } : { side: 'BOTH', quantity: '0', averageEntryPrice: '0', realizedPnl: '0' };
   const next = applyFill(base, order.side as 'BUY' | 'SELL', quantity, price);
   const realizedPnl = new Prisma.Decimal(next.realizedPnl).sub(new Prisma.Decimal(fee)).toFixed(18);
+  if (next.quantity === '0' || next.quantity === '0.000000000000000000') {
+    await prisma.position.deleteMany({ where: { symbol: order.symbol, ...(order.positionSide === 'BOTH' ? {} : { side: order.positionSide }) } });
+    return;
+  }
   if (existing && existing.side !== next.side) {
     const conflict = await prisma.position.findUnique({ where: { symbol_side: { symbol: order.symbol, side: next.side } } });
     if (conflict) {

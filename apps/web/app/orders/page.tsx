@@ -16,6 +16,7 @@ type OrderRow = {
   positionSide: string;
   symbol: string;
   orderType: string;
+  marketType: string;
   quantity: string;
   price: string | null;
   stopPrice: string | null;
@@ -40,6 +41,14 @@ type MarketMode = (typeof MARKET_MODES)[number]['id'];
 
 const TERMINAL_STATES = new Set(['FILLED', 'REJECTED', 'CANCELED', 'FAILED', 'EXPIRED']);
 const STATE_TONES: Record<string, string> = { FILLED: 'ok', QUEUED: 'ok', RECEIVED: 'muted', PLACED: 'warn', OPEN: 'warn', PARTIALLY_FILLED: 'warn', REJECTED: 'bad', CANCELED: 'muted', FAILED: 'bad', EXPIRED: 'muted' };
+type OrderFilter = 'SPOT' | 'USDT_FUTURES' | 'ALL';
+type StatusFilter = 'open' | 'closed' | 'all';
+
+const ORDER_FILTERS: Array<{ id: OrderFilter; label: string }> = [
+  { id: 'ALL', label: 'All markets' },
+  { id: 'USDT_FUTURES', label: 'Futures' },
+  { id: 'SPOT', label: 'Spot' },
+];
 
 function formatTime(iso: string | null): string {
   if (!iso) return '—';
@@ -73,6 +82,8 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [orderFilter, setOrderFilter] = useState<OrderFilter>('ALL');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
   const [marketMode, setMarketMode] = useState<MarketMode>('USDT_FUTURES');
   const [symbol, setSymbol] = useState('');
@@ -110,8 +121,8 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
     }
   }, [session]);
 
-  const loadOrders = useCallback(async () => {
-    setLoadingOrders(true);
+  const loadOrders = useCallback(async (silent = false) => {
+    if (!silent) setLoadingOrders(true);
     try {
       const data = await apiFetch<{ orders: OrderRow[] }>('/api/orders', session);
       setOrders(data.orders);
@@ -123,7 +134,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
         setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Failed to load orders.' });
       }
     } finally {
-      setLoadingOrders(false);
+      if (!silent) setLoadingOrders(false);
     }
   }, [session, setNotice, signOut]);
 
@@ -132,6 +143,11 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
     void loadSpotBalances();
     void loadOrders();
   }, [loadMarkets, loadSpotBalances, loadOrders]);
+
+  useEffect(() => {
+    const timer = setInterval(() => void loadOrders(true), 15000);
+    return () => clearInterval(timer);
+  }, [loadOrders]);
 
   const modeSymbols = useMemo(() => {
     const want = marketMode === 'SPOT' ? 'spot' : 'swap';
@@ -240,6 +256,20 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
 
   const isFutures = marketMode === 'USDT_FUTURES';
   const sellDisabled = marketMode === 'SPOT' && side === 'SELL' && spotBalances !== null && !spotBalancesError && (spotHoldingBase ?? 0) <= 0;
+
+  const visibleOrders = useMemo(() => {
+    return orders.filter((order) => {
+      if (orderFilter !== 'ALL' && (order.marketType ?? '').toUpperCase() !== orderFilter) return false;
+      const isOpen = !TERMINAL_STATES.has(order.state);
+      if (statusFilter === 'open' && !isOpen) return false;
+      if (statusFilter === 'closed' && isOpen) return false;
+      return true;
+    });
+  }, [orders, orderFilter, statusFilter]);
+
+  const openCount = useMemo(() => orders.filter((order) => !TERMINAL_STATES.has(order.state)).length, [orders]);
+  const spotCount = useMemo(() => orders.filter((order) => (order.marketType ?? '').toUpperCase() === 'SPOT').length, [orders]);
+  const futuresCount = useMemo(() => orders.filter((order) => (order.marketType ?? '').toUpperCase() !== 'SPOT').length, [orders]);
 
   return (
     <>
@@ -416,13 +446,41 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
           <div className="card-head">
             <div>
               <p>ORDER BOOK</p>
-              <h3>{orders.length} recent intents</h3>
+              <h3>{visibleOrders.length} shown · {openCount} open</h3>
             </div>
             <ArrowLeftRight size={16} className="muted" />
           </div>
+          <div className="window-tabs" role="tablist" aria-label="Order market filter">
+            {ORDER_FILTERS.map((filter) => (
+              <button
+                aria-selected={orderFilter === filter.id}
+                className={orderFilter === filter.id ? 'active' : ''}
+                key={filter.id}
+                onClick={() => setOrderFilter(filter.id)}
+                role="tab"
+                type="button"
+              >
+                {filter.label}{filter.id === 'SPOT' ? ` (${spotCount})` : filter.id === 'USDT_FUTURES' ? ` (${futuresCount})` : ''}
+              </button>
+            ))}
+          </div>
+          <div className="window-tabs" role="tablist" aria-label="Order status filter">
+            {(['open', 'closed', 'all'] as StatusFilter[]).map((status) => (
+              <button
+                aria-selected={statusFilter === status}
+                className={statusFilter === status ? 'active' : ''}
+                key={status}
+                onClick={() => setStatusFilter(status)}
+                role="tab"
+                type="button"
+              >
+                {status === 'open' ? 'Open' : status === 'closed' ? 'Closed' : 'All'}
+              </button>
+            ))}
+          </div>
           <div className="table-scroll">
-            {!loadingOrders && orders.length === 0 && <p className="muted empty">No orders yet — place one to see it here with executions and fees.</p>}
-            {orders.length > 0 && (
+            {!loadingOrders && visibleOrders.length === 0 && <p className="muted empty">No orders match this filter — place one to see it here with executions and fees.</p>}
+            {visibleOrders.length > 0 && (
               <table>
                 <thead>
                   <tr>
@@ -438,7 +496,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
                   </tr>
                 </thead>
                 <tbody>
-                  {orders.map((order) => {
+                  {visibleOrders.map((order) => {
                     const filled = order.executions.reduce((sum, execution) => sum + Number(execution.quantity), 0);
                     const fees = order.executions.reduce((sum, execution) => sum + Number(execution.fee), 0);
                     return (
@@ -454,6 +512,7 @@ function OrdersBody({ session, setNotice, signOut }: { session: AuthSession; set
                         <td>
                           <b>{order.symbol}</b>
                           <small className="muted block">{order.orderType}{order.reduceOnly ? ' · RO' : ''}</small>
+                          <small className="muted block">{order.marketType === 'SPOT' ? 'Spot' : 'Futures'}</small>
                         </td>
                         <td>{formatNumber(order.quantity)}</td>
                         <td>{order.price ? formatNumber(order.price) : order.stopPrice ? `~${formatNumber(order.stopPrice)}` : '—'}</td>

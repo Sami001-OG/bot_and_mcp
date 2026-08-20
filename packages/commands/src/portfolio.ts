@@ -59,14 +59,14 @@ export type RawExecution = {
 
 export type ExecutionRow = RawExecution & { orderIntent: { symbol: string; side: string; positionSide: string; orderType: string; state: string; clientOrderId: string; source: unknown } };
 
-export async function listOrders(take = 100): Promise<Array<{ id: string; symbol: string; side: string; positionSide: string; orderType: string; quantity: string; price: string | null; stopPrice: string | null; state: string; rejectionReason: string | null; exchangeOrderId: string | null; clientOrderId: string; reduceOnly: boolean; source: unknown; createdAt: Date; updatedAt: Date; executions: RawExecution[] }>> {
+export async function listOrders(take = 100): Promise<Array<{ id: string; symbol: string; side: string; positionSide: string; orderType: string; marketType: string; quantity: string; price: string | null; stopPrice: string | null; state: string; rejectionReason: string | null; exchangeOrderId: string | null; clientOrderId: string; reduceOnly: boolean; source: unknown; createdAt: Date; updatedAt: Date; executions: RawExecution[] }>> {
   return prisma.orderIntent.findMany({ include: { executions: true }, orderBy: { createdAt: 'desc' }, take });
 }
 
-export async function listExecutions(take = 100): Promise<Array<{ orderId: string; exchange: string; label: string; symbol: string; side: string; positionSide: string; orderType: string; state: string; clientOrderId: string; source: unknown; executionId: string; quantity: string; price: string; fee: string; feeAsset: string | null; executedAt: Date; createdAt: Date }>> {
+export async function listExecutions(take = 100): Promise<Array<{ orderId: string; exchange: string; label: string; symbol: string; side: string; positionSide: string; orderType: string; marketType: string; state: string; clientOrderId: string; source: unknown; executionId: string; quantity: string; price: string; fee: string; feeAsset: string | null; executedAt: Date; createdAt: Date }>> {
   const config = await getAccountConfig();
   const executions = await prisma.execution.findMany({
-    include: { orderIntent: { select: { symbol: true, side: true, positionSide: true, orderType: true, state: true, clientOrderId: true, source: true } } },
+    include: { orderIntent: { select: { symbol: true, side: true, positionSide: true, orderType: true, marketType: true, state: true, clientOrderId: true, source: true } } },
     orderBy: { executedAt: 'desc' },
     take,
   });
@@ -78,6 +78,7 @@ export async function listExecutions(take = 100): Promise<Array<{ orderId: strin
     side: execution.orderIntent.side,
     positionSide: execution.orderIntent.positionSide,
     orderType: execution.orderIntent.orderType,
+    marketType: execution.orderIntent.marketType,
     state: execution.orderIntent.state,
     clientOrderId: execution.orderIntent.clientOrderId,
     source: execution.orderIntent.source,
