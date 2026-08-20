@@ -16,11 +16,11 @@ export type ShellContext = {
 };
 
 export const NAV_ITEMS = [
-  { key: 'dashboard', href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { key: 'orders', href: '/orders', label: 'Orders', icon: BookOpen },
-  { key: 'bots', href: '/bots', label: 'Bots', icon: Bot },
-  { key: 'webhooks', href: '/webhooks', label: 'Webhooks', icon: Webhook },
-  { key: 'accounts', href: '/accounts', label: 'Exchange APIs', icon: KeyRound },
+  { key: 'dashboard', href: '/dashboard', label: 'Dashboard', short: 'Dashboard', icon: LayoutDashboard },
+  { key: 'orders', href: '/orders', label: 'Orders', short: 'Orders', icon: BookOpen },
+  { key: 'bots', href: '/bots', label: 'Bots', short: 'Bots', icon: Bot },
+  { key: 'webhooks', href: '/webhooks', label: 'Webhooks', short: 'Webhooks', icon: Webhook },
+  { key: 'accounts', href: '/accounts', label: 'Exchange APIs', short: 'APIs', icon: KeyRound },
 ] as const;
 
 export type AppSection = (typeof NAV_ITEMS)[number]['key'];
@@ -37,6 +37,14 @@ export default function AppShell({
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
+  const [utcClock, setUtcClock] = useState('');
+
+  useEffect(() => {
+    const tick = () => setUtcClock(new Date().toISOString().slice(0, 19).replace('T', ' '));
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     checkSession().then((next) => {
@@ -92,7 +100,7 @@ export default function AppShell({
           <form onSubmit={handleLogin}>
             <label>
               Password
-              <input autoComplete="current-password" minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
+              <input autoComplete="current-password" autoFocus minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
             </label>
             <button className="primary" disabled={submitting} type="submit">
               {submitting ? 'Signing in…' : 'Sign in'}
@@ -128,7 +136,7 @@ export default function AppShell({
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             return (
-              <Link className={`nav-link${active === item.key ? ' active' : ''}`} href={item.href} key={item.key}>
+              <Link aria-current={active === item.key ? 'page' : undefined} className={`nav-link${active === item.key ? ' active' : ''}`} href={item.href} key={item.key}>
                 <Icon size={15} /> {item.label}
               </Link>
             );
@@ -154,12 +162,12 @@ export default function AppShell({
         <div className="terminal-bar">
           <div><span className="status-pulse" /> LIVE ENVIRONMENT</div>
           <span>BYBIT / USDT-M + SPOT</span>
-          <span className="terminal-clock">SECURE OPERATOR SESSION</span>
+          <span className="terminal-clock">UTC {utcClock}</span>
         </div>
         <nav className="mobile-command-bar" aria-label="Mobile navigation">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
-            return <Link aria-label={item.label} className={active === item.key ? 'active' : ''} href={item.href} key={item.key}><Icon size={17} /><span>{item.label}</span></Link>;
+            return <Link aria-current={active === item.key ? 'page' : undefined} aria-label={item.label} className={active === item.key ? 'active' : ''} href={item.href} key={item.key}><Icon size={17} /><span>{item.short}</span></Link>;
           })}
         </nav>
         <section className="content">
