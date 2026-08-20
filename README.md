@@ -42,7 +42,7 @@ Everything below applies equally to `localhost:3000` and the deployed URL.
 
 There are exactly three ways to get an order to the exchange:
 
-1. **TradingView webhook → bot** (the intended main path). A signed alert hits `/api/webhooks/tradingview/:endpointId`. The signature is verified, the payload is checked against the signal schema, and the signal is routed to every **ACTIVE** webhook bot subscribed to that endpoint — or, if the endpoint has no subscribed bots (e.g. an endpoint you created manually on the Webhooks page), to **all** ACTIVE webhook bots. Each bot then applies its own filters (symbol match incl. `*` wildcard, allowed-actions list, exchange) and skips non-matching signals. For matching signals the bot computes order size from its allocation mode, applies its SL/TP bracket, runs each order through the risk engine, persists it as an `OrderIntent`, and executes it synchronously against Bybit. Delivery is `DELIVERED` only if every matched bot run succeeded; otherwise `FAILED` with `routed`/`failed` counts.
+1. **TradingView webhook → bot** (the intended main path). A signed alert hits `/api/webhooks/tradingview/:endpointId`. The signature is verified, the payload is checked against the signal schema, and the signal is routed to the **ACTIVE** bot that owns that endpoint. Each bot then applies its own filters (symbol match incl. `*` wildcard, allowed-actions list, exchange) and skips non-matching signals. For matching signals the bot computes order size from its allocation mode, applies its SL/TP bracket, runs each order through the risk engine, persists it as an `OrderIntent`, and executes it synchronously against Bybit. Delivery is `DELIVERED` only if the bot run succeeded; otherwise `FAILED` with `routed`/`failed` counts.
 2. **MCP trade tools** (`placeOrder`, `cancelOrder`, `closePosition`, `closeAll`, `changeLeverage`) — executed synchronously through the same commands/risk-engine/execute pipeline. You can call these from any MCP client (Claude, Cursor, custom scripts).
 3. **Orders page** (manual order form + cancel + emergency close-all) — same synchronous pipeline.
 
@@ -112,7 +112,7 @@ Go to **Bots** (`/bots`):
 - **Dedicated endpoints**: creating a bot (UI or MCP) creates its own webhook endpoint **and** its own MCP endpoint. The create dialog shows each once:
   - Webhook URL `https://<host>/api/webhooks/tradingview/<endpointId>` + password (HMAC secret).
   - MCP URL `https://<host>/api/mcp/bots/<botId>` + the same password (Bearer token). Authenticate with this URL from Claude/Cursor etc.
-  - A signal to a bot's own endpoint only ever triggers that bot. Manually-created endpoints on the Webhooks page no longer fan out to all bots — they deliver to the bot that owns them (or log `no ACTIVE bot for this endpoint`).
+  - A signal to a bot's own endpoint only ever triggers that bot. Endpoints are bot-owned only — there is no standalone endpoint creation (the old Webhooks page was removed).
 - **Delete / Delete all**: every bot row has a permanent-delete action; the header has a **Delete all** button (also used internally when you force-delete an exchange account).
 - **Bot detail** shows the bound account, config version history, and **runs** — each webhook trigger produces a run row with metrics: signal action, symbol, mark price, number of orders placed, skipped (with reasons, e.g. "Order margin exceeds available equity", "Order value below minimum of $10", "Symbol X not in configured bot symbols"), the position-management pass summary (`managed`), and errors.
 
@@ -120,10 +120,10 @@ Go to **Bots** (`/bots`):
 
 ### Create an endpoint
 
-Go to **Webhooks** (`/webhooks`), enter a name, and create. You get:
+Endpoints are **bot-owned** — creating a bot (UI or MCP) provisions its webhook endpoint automatically and shows you once:
 
 - **URL** — `https://<your-host>/api/webhooks/tradingview/<endpointId>`
-- **Signing secret** — shown **exactly once**; copy it immediately. It is stored encrypted and can never be retrieved again (if you lose it, delete and recreate the endpoint).
+- **Signing secret** — shown **exactly once**; copy it immediately. It is stored encrypted and can never be retrieved again (if you lose it, delete and recreate the bot).
 
 ### Signal payload format
 
@@ -411,7 +411,7 @@ If `WEBHOOK_REQUIRE_SIGNATURE=false`, unsigned requests are accepted (do not do 
 
 | Status | Meaning |
 |---|---|
-| `202` | Accepted. Body: `{ deliveryId, routed, failed, bots: [...] }`. `routed` = bots that processed it, `failed` = bot runs that errored, `deliveryId` = the persisted `WebhookDelivery` (view deliveries on the Webhooks page). Each `bots[]` entry: `{ botId, runId, status, orders, skipped, notes, price, positionSide, managed? }` — `managed` is present when the run executed a DCA/breakeven/partial-TP pass (always for `MANAGE`). A `note` field may explain degenerate cases: `LIVE_TRADING_DISABLED` (trading toggle off — `failed: 1`) or `no ACTIVE bot for this endpoint`. |
+| `202` | Accepted. Body: `{ deliveryId, routed, failed, bots: [...] }`. `routed` = bots that processed it, `failed` = bot runs that errored, `deliveryId` = the persisted `WebhookDelivery` (view deliveries on the Bots page). Each `bots[]` entry: `{ botId, runId, status, orders, skipped, notes, price, positionSide, managed? }` — `managed` is present when the run executed a DCA/breakeven/partial-TP pass (always for `MANAGE`). A `note` field may explain degenerate cases: `LIVE_TRADING_DISABLED` (trading toggle off — `failed: 1`) or `no ACTIVE bot for this endpoint`. |
 | `401` | Missing/invalid signature, stale timestamp, or replayed nonce (`WEBHOOK_VERIFICATION_FAILED`). |
 | `404` / `410` | Unknown endpoint / endpoint deactivated (endpoints are deactivated when their bot is paused/stopped). |
 | `4xx/5xx` | Schema or processing errors. |
@@ -568,8 +568,7 @@ All routes are session-protected except the public ones noted. Responses are JSO
 | `GET` | `/api/portfolio/pnl` | Realized PnL |
 | `GET` | `/api/portfolio/positions` | Open positions |
 | `GET` | `/api/portfolio/executions` | Recent fills |
-| `GET` / `POST` | `/api/webhooks` | List / create endpoints (create returns `signingSecret` once) |
-| `POST` | `/api/webhooks/tradingview/[endpointId]` | **Public** — signed TradingView ingress |
+| `POST` | `/api/webhooks/tradingview/[endpointId]` | **Public** — signed TradingView ingress (bot-owned endpoints) |
 | `POST` | `/api/cron` | Maintenance (CRON_SECRET) |
 | `GET` / `POST` | `/api/mcp` | **Public** — global MCP server (Bearer `MCP_PASSWORD`) |
 | `GET` / `POST` | `/api/mcp/bots/[botId]` | **Public** — per-bot MCP server (Bearer bot password) |
@@ -719,6 +718,6 @@ On a fresh `npm install`, re-apply the local build workarounds (nft home-glob pa
 - This software places live orders on Bybit with **real funds** when a signal arrives. Test with minimal amounts on a separate API key first; keep the global trading toggle off until you're confident.
 - Every bot is bound to its own exchange API — revoke a key on Bybit to instantly kill everything using it.
 - The daily-loss limit and trading toggle are your primary risk stops; the emergency close-all is your last resort.
-- Monitor webhook deliveries (Webhooks page) and bot runs (Bots page) — `routed`/`failed` and `skipped` reasons tell you what actually happened.
+- Monitor webhook deliveries and bot runs (Bots page) — `routed`/`failed` and `skipped` reasons tell you what actually happened.
 - The MCP write tools are live-fire: do not hand the `MCP_PASSWORD` to an untrusted agent.
 - Cryptocurrency and leveraged derivatives can cause rapid, total, or greater-than-deposit losses. Software controls reduce operational risk, not market risk.

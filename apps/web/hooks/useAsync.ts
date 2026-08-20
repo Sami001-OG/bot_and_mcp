@@ -27,7 +27,6 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []) {
 
   useEffect(() => {
     void run();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
   return { data, error, loading, run, setData };
