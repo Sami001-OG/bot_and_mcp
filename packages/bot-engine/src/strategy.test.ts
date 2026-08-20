@@ -138,7 +138,14 @@ describe('buildWebhookOrders', () => {
     expect(result.skipped).toEqual([]);
     const trailing = result.orders.find((order) => order.type === 'TRAILING_STOP');
     if (!trailing) throw new Error('expected trailing stop order');
-    expect(trailing).toMatchObject({ side: 'SELL', positionSide: 'LONG', stopPrice: '95000', callbackRate: '1.5', reduceOnly: true, idempotencyKey: 'n-123456789012:tr' });
+    expect(trailing).toMatchObject({ side: 'SELL', positionSide: 'LONG', stopPrice: '96425.00000000', callbackRate: '1.5', reduceOnly: true, idempotencyKey: 'n-123456789012:tr' });
+  });
+
+  it('activates the trailing stop in the favorable direction for a short', () => {
+    const result = buildWebhookOrders({ signal: signal({ action: 'SHORT', trailing: { callbackPercent: 2 } }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    const trailing = result.orders.find((order) => order.type === 'TRAILING_STOP');
+    if (!trailing) throw new Error('expected trailing stop order');
+    expect(trailing).toMatchObject({ side: 'BUY', positionSide: 'SHORT', stopPrice: '93100.00000000', callbackRate: '2', reduceOnly: true });
   });
 
   it('attaches a trailing stop from the saved bot config', () => {

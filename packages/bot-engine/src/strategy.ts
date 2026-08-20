@@ -107,8 +107,11 @@ export function buildWebhookOrders(input: WebhookBuildInput): WebhookBuildResult
     }
     const trailing = signal.trailing ?? config.trailing;
     if (trailing && trailing.enabled !== false && input.price) {
-      push({ ...base, side: closingSide, positionSide, type: 'TRAILING_STOP', quantity: entryQuantity, stopPrice: input.price, callbackRate: String(trailing.callbackPercent), reduceOnly: true, clientOrderId: `wh-tr-${keyId}`, idempotencyKey: `${signal.nonce}:tr` });
-      notes.push(`Trailing stop placed with ${trailing.callbackPercent}% callback`);
+      const callback = Number(trailing.callbackPercent);
+      const rawActivation = positionSide === 'LONG' ? Number(input.price) * (1 + callback / 100) : Number(input.price) * (1 - callback / 100);
+      const activation = snap(String(rawActivation.toFixed(8)));
+      push({ ...base, side: closingSide, positionSide, type: 'TRAILING_STOP', quantity: entryQuantity, ...(activation === undefined ? {} : { stopPrice: activation }), callbackRate: String(trailing.callbackPercent), reduceOnly: true, clientOrderId: `wh-tr-${keyId}`, idempotencyKey: `${signal.nonce}:tr` });
+      notes.push(`Trailing stop placed: activates after ${trailing.callbackPercent}% move in favor, then follows with ${trailing.callbackPercent}% callback`);
     } else if (trailing && trailing.enabled !== false && !input.price) {
       skipped.push('Trailing stop skipped: market price unavailable for activation price');
     }

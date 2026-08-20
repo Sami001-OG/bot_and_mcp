@@ -201,6 +201,40 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
     }
   }
   private async executePlacement(order: OrderRequest, params: Record<string, unknown>): Promise<ExchangeOrder> {
+    if (order.type === 'TRAILING_STOP') {
+      if (this.id === 'bybit' && this.marketType !== 'SPOT') {
+        const client = this.requireClient() as unknown as { privatePostV5PositionTradingStop: (request: Record<string, unknown>) => Promise<{ result?: { stopOrderId?: string; orderId?: string } }> };
+        const [base, quot] = order.symbol.split('/');
+        const exchangeSymbol = `${base?.toUpperCase()}${quot?.split(':')[0]?.toUpperCase()}`;
+        const positionSide = order.positionSide ?? (order.side.toLowerCase() === 'buy' ? 'LONG' : 'SHORT');
+        const hedgedMode = (await this.bybitPositionMode(order.symbol)) === 'hedged';
+        const request: Record<string, unknown> = {
+          category: 'linear',
+          symbol: exchangeSymbol,
+          trailingStop: order.callbackRate ?? '1',
+          ...(order.stopPrice ? { activePrice: String(order.stopPrice) } : {}),
+          ...(hedgedMode ? { positionIdx: positionSide === 'SHORT' ? 2 : 1 } : {})
+        };
+        const response = await client.privatePostV5PositionTradingStop(request);
+        const result = response.result ?? {};
+        const id = String(result.stopOrderId ?? result.orderId ?? '');
+        const created: ExchangeOrder = {
+          id,
+          clientOrderId: order.clientOrderId ?? '',
+          symbol: order.symbol,
+          side: order.side.toLowerCase() as ExchangeOrder['side'],
+          type: order.type,
+          status: id ? 'NEW' : 'REJECTED',
+          quantity: String(order.quantity),
+          filledQuantity: '0',
+          rawStatus: id ? 'open' : 'rejected',
+          updatedAt: new Date().toISOString()
+        };
+        if (!id) throw new Error(`Bybit trailing stop rejected: ${JSON.stringify(response)}`);
+        return created;
+      }
+      if (this.marketType === 'SPOT') throw new Error('Trailing stops are not supported on spot orders');
+    }
     if (order.stopPrice) {
       if (this.id === 'bybit' && this.marketType !== 'SPOT') {
         const client = this.requireClient() as unknown as { privatePostV5OrderCreate: (request: Record<string, unknown>) => Promise<{ result?: { orderId?: string; orderLinkId?: string } }> };
