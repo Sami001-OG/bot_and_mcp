@@ -58,6 +58,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ botId: string }> }): Promise<Response> {
   const { botId } = await params;
+  if (request.nextUrl.searchParams.get('warm') === '1') {
+    return NextResponse.json({ ok: true, ts: new Date().toISOString() });
+  }
   const auth = await authorizeBot(request, botId);
   if (!auth.ok) return NextResponse.json(auth.body, { status: auth.status });
   return handleMcpGet(request);

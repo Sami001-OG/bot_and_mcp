@@ -2,7 +2,7 @@ import { prisma, Prisma, type OrderIntent } from '@platform/database';
 import { ExchangeError, type ExchangeAdapter, type ExchangeOrder } from '@platform/exchange-core';
 import { OrderRequestSchema, type Allocation, type ResolvedOrderRequest } from '@platform/contracts';
 import { sizeOrder, applyFill, alignAmount, alignPrice, type PositionSnapshot } from '@platform/trading-core';
-import { connectToAccount, getAccountConfig, marketPrecisionOf } from './account.js';
+import { connectToAccount, getAccountConfig, marketPrecisionOf, type AccountConfig } from './account.js';
 import { getSettings } from './settings.js';
 import { syncPositionsFromExchange } from './ledger.js';
 import { CommandError } from './errors.js';
@@ -112,7 +112,9 @@ const MAX_EXECUTE_ATTEMPTS = 5;
 
 export type ExecuteResult = { orderId: string; state: OrderIntent['state']; exchangeOrderId?: string; filled?: number; error?: string; skipped?: boolean };
 
-export async function executeOrderNow(orderId: string): Promise<ExecuteResult> {
+export type ExecuteContext = { config?: AccountConfig; adapter?: ExchangeAdapter };
+
+export async function executeOrderNow(orderId: string, ctx?: ExecuteContext): Promise<ExecuteResult> {
   const order = await prisma.orderIntent.findUniqueOrThrow({ where: { id: orderId } });
   if ((TERMINAL_STATES as readonly string[]).includes(order.state)) return { orderId, state: order.state, skipped: true };
   const settings = await getSettings();
@@ -120,15 +122,19 @@ export async function executeOrderNow(orderId: string): Promise<ExecuteResult> {
     await setState(orderId, 'REJECTED', 'LIVE_TRADING_DISABLED');
     return { orderId, state: 'REJECTED', error: 'LIVE_TRADING_DISABLED' };
   }
-  const config = await getAccountConfig(order.exchangeAccountId ?? undefined);
+  const config = ctx?.config ?? await getAccountConfig(order.exchangeAccountId ?? undefined);
   const marketType = (order.marketType ?? config.marketType).toUpperCase() as 'SPOT' | 'USDT_FUTURES';
   let submitted = false;
   let attempt = 0;
   while (true) {
-    let adapter: ExchangeAdapter | undefined;
+    let adapter: ExchangeAdapter | undefined = ctx?.adapter;
+    let ownsAdapter = false;
     try {
-      const session = await connectToAccount(order.exchangeAccountId ?? undefined, marketType);
-      adapter = session.adapter;
+      if (!adapter) {
+        const session = await connectToAccount(order.exchangeAccountId ?? undefined, marketType);
+        adapter = session.adapter;
+        ownsAdapter = true;
+      }
       if (order.exchangeOrderId) {
         const result = await reconcileOrder(adapter, order);
         return { orderId, state: order.state, exchangeOrderId: order.exchangeOrderId, filled: Number(await filledQuantityOf(orderId)) };
@@ -253,7 +259,7 @@ export async function executeOrderNow(orderId: string): Promise<ExecuteResult> {
       }
       return { orderId, state: finalState, error: exchangeError.code };
     } finally {
-      await adapter?.disconnect().catch(() => undefined);
+      if (ownsAdapter) await adapter?.disconnect().catch(() => undefined);
     }
   }
 }
@@ -395,8 +401,8 @@ export type PersistOrderOptions = {
   exchangeAccountId?: string;
 };
 
-export async function persistOrder(order: PersistedOrderLike, options: PersistOrderOptions = {}): Promise<{ order: OrderIntent; created: boolean }> {
-  const config = await getAccountConfig(options.exchangeAccountId ?? undefined);
+export async function persistOrder(order: PersistedOrderLike, options: PersistOrderOptions = {}, config?: AccountConfig): Promise<{ order: OrderIntent; created: boolean }> {
+  const resolved = config ?? await getAccountConfig(options.exchangeAccountId ?? undefined);
   try {
     const orderIntent = await prisma.orderIntent.create({
       data: {
@@ -406,8 +412,8 @@ export async function persistOrder(order: PersistedOrderLike, options: PersistOr
         side: order.side,
         positionSide: order.positionSide,
         orderType: order.type,
-        marketType: options.marketType ?? config.marketType,
-        exchangeAccountId: config.id,
+        marketType: options.marketType ?? resolved.marketType,
+        exchangeAccountId: resolved.id,
         quantity: order.quantity,
         ...(order.price ? { price: order.price } : {}),
         ...(order.stopPrice ? { stopPrice: order.stopPrice } : {}),

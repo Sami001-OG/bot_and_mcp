@@ -1,10 +1,10 @@
 import { prisma, Prisma } from '@platform/database';
 import { createExchangeAdapter } from '@platform/exchange-adapters';
-import { ExchangeError, type ExchangeAdapter, type ExchangeConnection, type MarketInfo, type MarketPrecision } from '@platform/exchange-core';
+import { ExchangeError, type ExchangeAdapter, type ExchangeConnection, type MarketPrecision } from '@platform/exchange-core';
 import type { ExchangeId, MarketType } from '@platform/contracts';
 import { getSettings, updateSettings } from './settings.js';
 import { getAccountSecret, getPrimaryAccount } from './exchange-accounts.js';
-import { fetchMarketsCached } from './markets.js';
+import { readCachedMarkets } from './markets.js';
 
 export type AccountConfig = { id: string; exchange: ExchangeId; marketType: MarketType; label: string; apiKey: string; secret: string; testnet: boolean };
 
@@ -25,12 +25,13 @@ export async function getAccountConfig(accountId?: string): Promise<AccountConfi
   };
 }
 
-export async function connectToAccount(accountId?: string, marketType?: MarketType): Promise<{ adapter: ExchangeAdapter; connection: ExchangeConnection; config: AccountConfig }> {
-  const config = await getAccountConfig(accountId);
-  const adapter = createExchangeAdapter(config.exchange, marketType ?? config.marketType);
+export async function connectToAccount(accountId?: string, marketType?: MarketType, config?: AccountConfig): Promise<{ adapter: ExchangeAdapter; connection: ExchangeConnection; config: AccountConfig }> {
+  const resolved = config ?? await getAccountConfig(accountId);
+  const adapter = createExchangeAdapter(resolved.exchange, marketType ?? resolved.marketType);
   try {
-    const connection = await adapter.connect({ apiKey: config.apiKey, secret: config.secret, testnet: config.testnet });
-    return { adapter, connection, config };
+    const cached = await readCachedMarkets();
+    const connection = await adapter.connect({ apiKey: resolved.apiKey, secret: resolved.secret, testnet: resolved.testnet }, cached ? { markets: cached.markets } : undefined);
+    return { adapter, connection, config: resolved };
   } catch (error) {
     await adapter.disconnect().catch(() => undefined);
     throw error;
@@ -66,7 +67,8 @@ export async function marketPrecisionOf(adapter: ExchangeAdapter, symbol: string
   if (hit && hit.expiresAt > Date.now()) return hit.precision;
   let precision: MarketPrecision | null = null;
   try {
-    const { markets } = await fetchMarketsCached().catch(() => ({ markets: [] as MarketInfo[] }));
+    const cached = await readCachedMarkets();
+    const markets = cached ? cached.markets : [];
     const resolved = symbol.includes(':') ? symbol : adapter.resolveMarketSymbol(symbol);
     const match = markets.find((market) => market.symbol.toUpperCase() === resolved.toUpperCase());
     if (match) precision = { ...(match.amountStep !== undefined ? { amountStep: match.amountStep } : {}), ...(match.amountMin !== undefined ? { amountMin: match.amountMin } : {}), ...(match.priceStep !== undefined ? { priceStep: match.priceStep } : {}), ...(match.priceMin !== undefined ? { priceMin: match.priceMin } : {}) };

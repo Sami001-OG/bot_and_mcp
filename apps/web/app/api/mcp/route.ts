@@ -49,6 +49,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 }
 
 export async function GET(request: NextRequest): Promise<Response> {
+  if (request.nextUrl.searchParams.get('warm') === '1') {
+    return NextResponse.json({ ok: true, ts: new Date().toISOString() });
+  }
   if (!authorized(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }

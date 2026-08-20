@@ -3,10 +3,13 @@ import { MIN_ORDER_NOTIONAL_USD, type BreakevenConfig, type DcaConfig, type Mana
 import { alignAmount } from '@platform/trading-core';
 import { evaluateOrder } from '@platform/risk-engine';
 import { prisma } from '@platform/database';
-import { connectToAccount, marketPrecisionOf } from './account.js';
+import { connectToAccount, marketPrecisionOf, type AccountConfig } from './account.js';
 import { getBotTradeContext } from './bot-trade.js';
 import { executeOrderNow, persistOrder } from './execute.js';
 import { loadPolicy } from './orders.js';
+import { type ExchangeAdapter } from '@platform/exchange-core';
+
+export type ManageSession = { config?: AccountConfig; adapter?: ExchangeAdapter; botConfig?: WebhookBotConfig };
 
 export type ManageState = {
   dca: Record<string, { steps: number }>;
@@ -90,7 +93,7 @@ async function placeManagedOrder(input: {
   reduceOnly: boolean;
   quantity: string;
   feature: 'breakeven' | 'tp' | 'dca';
-}): Promise<{ placed: boolean; filled: boolean; error?: string }> {
+}, session: ManageSession): Promise<{ placed: boolean; filled: boolean; error?: string }> {
   try {
     const { order, created } = await persistOrder(
       {
@@ -106,9 +109,10 @@ async function placeManagedOrder(input: {
         idempotencyKey: input.idempotencyKey,
       },
       { source: { kind: 'bot-manage', feature: input.feature, botId: input.botId } },
+      session.config,
     );
     if (!created) return { placed: false, filled: false, error: 'duplicate idempotency key; order already exists' };
-    const execution = await executeOrderNow(order.id);
+    const execution = await executeOrderNow(order.id, { ...(session.config ? { config: session.config } : {}), ...(session.adapter ? { adapter: session.adapter } : {}) });
     if (execution.error) return { placed: true, filled: false, error: execution.error };
     if (execution.state === 'REJECTED' || execution.state === 'FAILED') return { placed: true, filled: false, error: execution.state };
     return { placed: true, filled: execution.state === 'FILLED' || execution.state === 'PARTIALLY_FILLED' };
@@ -126,8 +130,8 @@ export function mergeManagementOverrides(config: WebhookBotConfig, overrides: Ma
   return merged;
 }
 
-export async function manageBotPositions(botId: string, overrides?: ManagementOverrides): Promise<ManageResult> {
-  const ctx = await getBotTradeContext(botId);
+export async function manageBotPositions(botId: string, overrides?: ManagementOverrides, session?: ManageSession): Promise<ManageResult> {
+  const ctx = session?.botConfig && session.config ? { config: session.botConfig, account: session.config } : await getBotTradeContext(botId);
   ctx.config = mergeManagementOverrides(ctx.config, overrides);
   const result: ManageResult = { botId, positions: 0, dca: null, breakeven: null, tps: null, errors: [] };
   const dcaCfg = ctx.config.dca && ctx.config.dca.enabled ? ctx.config.dca : undefined;
@@ -140,17 +144,26 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
 
   const state = await loadState(botId);
   const policy = await loadPolicy().catch(() => null);
-  const session = await connectToAccount(ctx.account.id);
+  let adapter: ExchangeAdapter;
+  let ownsAdapter = false;
+  if (session?.adapter) {
+    adapter = session.adapter;
+  } else {
+    const connection = await connectToAccount(ctx.account.id);
+    adapter = connection.adapter;
+    ownsAdapter = true;
+  }
+  const sessionCtx: ManageSession = { ...(session?.config ? { config: session.config } : {}), adapter };
   try {
-    const positions = await session.adapter.getPositions();
-    const openOrders = await session.adapter.getOrders().catch(() => []);
-    const balances = await session.adapter.getBalance().catch(() => []);
+    const positions = await adapter.getPositions();
+    const openOrders = await adapter.getOrders().catch(() => []);
+    const balances = await adapter.getBalance().catch(() => []);
     const cancelOpenOrders = async (prefix: string): Promise<string[]> => {
       const canceled: string[] = [];
       for (const order of openOrders) {
         if (!order.clientOrderId || !order.clientOrderId.startsWith(prefix)) continue;
         try {
-          await session.adapter.cancelOrder(order.id, order.symbol);
+          await adapter.cancelOrder(order.id, order.symbol);
           canceled.push(order.clientOrderId);
         } catch {
           /* leave the order in place */
@@ -170,7 +183,7 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
       if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(entry) || entry <= 0 || !Number.isFinite(mark) || mark <= 0) continue;
       result.positions += 1;
       const key = symbolKey(position.symbol);
-      const precision = await marketPrecisionOf(session.adapter, position.symbol).catch(() => null);
+      const precision = await marketPrecisionOf(adapter, position.symbol).catch(() => null);
       const quote = (position.symbol.split('/')[1] ?? 'USDT').split(':')[0];
       const balance = balances.find((entry) => entry.asset === quote);
       const equity = balance ? Number(balance.total) : 0;
@@ -199,14 +212,14 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
       };
 
       if (brCfg && brOut) {
-        const br = await applyBreakeven(ctxForSymbol, brCfg, current.breakeven);
+        const br = await applyBreakeven(ctxForSymbol, brCfg, current.breakeven, sessionCtx);
         if (br.error) brOut.errors.push(br.error);
         else if (br.moved) brOut.moved.push(br.moved);
         else if (br.skipped) brOut.skipped.push(br.skipped);
       }
 
       if (tpsCfg && tpsOut) {
-        const tp = await applyPartialTps(ctxForSymbol, tpsCfg, current.tps, MIN_ORDER_NOTIONAL_USD[ctx.account.marketType]);
+        const tp = await applyPartialTps(ctxForSymbol, tpsCfg, current.tps, MIN_ORDER_NOTIONAL_USD[ctx.account.marketType], sessionCtx);
         tpsOut.claimed.push(...tp.claimed);
         tpsOut.placed.push(...tp.placed);
         tpsOut.skipped.push(...tp.skipped);
@@ -214,7 +227,7 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
       }
 
       if (dcaCfg && dcaOut) {
-        const dca = await applyDca(ctxForSymbol, dcaCfg, current.dca, equity, policy, ctx.account.exchange, ctx.account.marketType, MIN_ORDER_NOTIONAL_USD[ctx.account.marketType]);
+        const dca = await applyDca(ctxForSymbol, dcaCfg, current.dca, equity, policy, ctx.account.exchange, ctx.account.marketType, MIN_ORDER_NOTIONAL_USD[ctx.account.marketType], sessionCtx);
         dcaOut.placed.push(...dca.placed);
         dcaOut.skipped.push(...dca.skipped);
         dcaOut.errors.push(...dca.errors);
@@ -224,7 +237,7 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
   } catch (error) {
     result.errors.push(error instanceof Error ? error.message.slice(0, 300) : String(error));
   } finally {
-    await session.adapter.disconnect().catch(() => undefined);
+    if (ownsAdapter) await adapter.disconnect().catch(() => undefined);
   }
 
   await saveState(botId, state).catch((error) => {
@@ -246,7 +259,7 @@ export async function runAllBotManagement(): Promise<Array<{ botId: string; name
   return summaries;
 }
 
-async function applyBreakeven(input: ManageCtx, cfg: BreakevenConfig, stateEntry: ManageState['breakeven'][string]): Promise<{ moved?: string; skipped?: string; error?: string }> {
+async function applyBreakeven(input: ManageCtx, cfg: BreakevenConfig, stateEntry: ManageState['breakeven'][string], session: ManageSession): Promise<{ moved?: string; skipped?: string; error?: string }> {
   const long = input.position.side === 'LONG';
   const movedPct = cfg.moveAtProfitPercent / 100;
   const favorable = long ? input.mark >= input.entry * (1 + movedPct) : input.mark <= input.entry * (1 - movedPct);
@@ -276,7 +289,7 @@ async function applyBreakeven(input: ManageCtx, cfg: BreakevenConfig, stateEntry
     reduceOnly: true,
     quantity: input.position.quantity,
     feature: 'breakeven',
-  });
+  }, session);
   if (outcome.error) return { error: `${input.position.symbol}: breakeven SL failed (${outcome.error})` };
   stateEntry.applied = true;
   stateEntry.target = target.toFixed(8);
@@ -284,7 +297,7 @@ async function applyBreakeven(input: ManageCtx, cfg: BreakevenConfig, stateEntry
   return { moved: `${input.position.symbol} → SL ${target.toFixed(8)}` };
 }
 
-async function applyPartialTps(input: ManageCtx, cfg: PartialTpsConfig, stateEntry: ManageState['tps'][string], minNotional: string): Promise<{ claimed: string[]; placed: string[]; skipped: string[]; errors: string[] }> {
+async function applyPartialTps(input: ManageCtx, cfg: PartialTpsConfig, stateEntry: ManageState['tps'][string], minNotional: string, session: ManageSession): Promise<{ claimed: string[]; placed: string[]; skipped: string[]; errors: string[] }> {
   const out = { claimed: [] as string[], placed: [] as string[], skipped: [] as string[], errors: [] as string[] };
   const long = input.position.side === 'LONG';
   const restingPrefix = managePrefix('tpr', input.botId, input.position.symbol);
@@ -317,7 +330,7 @@ async function applyPartialTps(input: ManageCtx, cfg: PartialTpsConfig, stateEnt
         reduceOnly: true,
         quantity: String(portionQty),
         feature: 'tp',
-      });
+      }, session);
       if (outcome.error) { out.errors.push(`${input.position.symbol}: TP${index + 1} claim failed (${outcome.error})`); continue; }
       if (outcome.filled) {
         stateEntry.claimed.push(index);
@@ -342,7 +355,7 @@ async function applyPartialTps(input: ManageCtx, cfg: PartialTpsConfig, stateEnt
         reduceOnly: true,
         quantity: String(portionQty),
         feature: 'tp',
-      });
+      }, session);
       if (outcome.error) { out.errors.push(`${input.position.symbol}: TP${index + 1} order failed (${outcome.error})`); continue; }
       if (outcome.placed) {
         stateEntry.placed.push(index);
@@ -353,7 +366,7 @@ async function applyPartialTps(input: ManageCtx, cfg: PartialTpsConfig, stateEnt
   return out;
 }
 
-async function applyDca(input: ManageCtx, cfg: DcaConfig, stateEntry: ManageState['dca'][string], equity: number, policy: Awaited<ReturnType<typeof loadPolicy>> | null, exchange: string, marketType: string, minNotional: string): Promise<{ steps: number; placed: string[]; skipped: string[]; errors: string[] }> {
+async function applyDca(input: ManageCtx, cfg: DcaConfig, stateEntry: ManageState['dca'][string], equity: number, policy: Awaited<ReturnType<typeof loadPolicy>> | null, exchange: string, marketType: string, minNotional: string, session: ManageSession): Promise<{ steps: number; placed: string[]; skipped: string[]; errors: string[] }> {
   const out = { steps: 0, placed: [] as string[], skipped: [] as string[], errors: [] as string[] };
   const long = input.position.side === 'LONG';
   const dropPct = long ? (input.entry - input.mark) / input.entry * 100 : (input.mark - input.entry) / input.entry * 100;
@@ -392,7 +405,7 @@ async function applyDca(input: ManageCtx, cfg: DcaConfig, stateEntry: ManageStat
     reduceOnly: false,
     quantity: String(qty),
     feature: 'dca',
-  });
+  }, session);
   if (outcome.error) { out.errors.push(`${input.position.symbol}: DCA step ${nextStep} failed (${outcome.error})`); return out; }
   if (outcome.filled) {
     stateEntry.steps = nextStep;

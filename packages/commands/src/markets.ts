@@ -16,28 +16,51 @@ export type MarketsResult = {
   error?: string;
 };
 
-export async function fetchMarketsCached(): Promise<MarketsResult> {
+export async function readCachedMarkets(): Promise<{ markets: MarketInfo[]; source: 'memory' | 'db' } | null> {
   const hit = memory.get(CACHE_KEY);
-  if (hit && hit.expiresAt > Date.now()) {
-    return { markets: hit.markets, source: 'memory', generatedAt: new Date().toISOString() };
+  if (hit && hit.expiresAt > Date.now()) return { markets: hit.markets, source: 'memory' };
+  const row = await prisma.marketCache.findUnique({ where: { key: CACHE_KEY } }).catch(() => null);
+  if (row?.payload && Array.isArray(row.payload)) {
+    const markets = row.payload as unknown as MarketInfo[];
+    memory.set(CACHE_KEY, { expiresAt: Date.now() + MARKETS_TTL_MS, markets });
+    return { markets, source: 'db' };
   }
-  try {
+  return null;
+}
+
+let refreshPromise: Promise<MarketsResult> | undefined;
+
+async function refreshMarketsLive(): Promise<MarketsResult> {
+  if (refreshPromise) return refreshPromise;
+  const promise: Promise<MarketsResult> = (async (): Promise<MarketsResult> => {
     const { adapter } = await connectToAccount();
-    let markets: MarketInfo[];
     try {
-      markets = await adapter.getMarkets();
+      const markets = await adapter.getMarkets(true);
+      memory.set(CACHE_KEY, { expiresAt: Date.now() + MARKETS_TTL_MS, markets });
+      await prisma.marketCache
+        .upsert({
+          where: { key: CACHE_KEY },
+          update: { payload: markets as unknown as Prisma.InputJsonValue },
+          create: { key: CACHE_KEY, payload: markets as unknown as Prisma.InputJsonValue },
+        })
+        .catch(() => undefined);
+      return { markets, source: 'live', generatedAt: new Date().toISOString() };
     } finally {
       await adapter.disconnect().catch(() => undefined);
     }
-    memory.set(CACHE_KEY, { expiresAt: Date.now() + MARKETS_TTL_MS, markets });
-    await prisma.marketCache
-      .upsert({
-        where: { key: CACHE_KEY },
-        update: { payload: markets as unknown as Prisma.InputJsonValue },
-        create: { key: CACHE_KEY, payload: markets as unknown as Prisma.InputJsonValue },
-      })
-      .catch(() => undefined);
-    return { markets, source: 'live', generatedAt: new Date().toISOString() };
+  })().finally(() => { refreshPromise = undefined; });
+  refreshPromise = promise;
+  return promise;
+}
+
+export async function fetchMarketsCached(): Promise<MarketsResult> {
+  const seeded = await readCachedMarkets();
+  if (seeded) {
+    void refreshMarketsLive().catch(() => undefined);
+    return { markets: seeded.markets, source: seeded.source, generatedAt: new Date().toISOString() };
+  }
+  try {
+    return await refreshMarketsLive();
   } catch (error) {
     const row = await prisma.marketCache.findUnique({ where: { key: CACHE_KEY } }).catch(() => null);
     if (row?.payload && Array.isArray(row.payload)) {

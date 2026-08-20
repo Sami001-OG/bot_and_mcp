@@ -1,6 +1,6 @@
 import ccxt, { type Exchange } from 'ccxt';
 import type { ExchangeId, MarginMode, MarketType, OrderRequest } from '@platform/contracts';
-import { ExchangeError, type AdapterCapabilities, type Balance, type ExchangeAdapter, type ExchangeConnection, type ExchangeCredentials, type ExchangeOrder, type FundingRate, type Leverage, type MarketInfo, type OHLCV, type OpenInterest, type Position } from '@platform/exchange-core';
+import { ExchangeError, type AdapterCapabilities, type Balance, type ExchangeAdapter, type ExchangeConnection, type ExchangeConnectOptions, type ExchangeCredentials, type ExchangeOrder, type FundingRate, type Leverage, type MarketInfo, type OHLCV, type OpenInterest, type Position } from '@platform/exchange-core';
 
 const capabilities: Record<ExchangeId, AdapterCapabilities> = {
   binance: { marketTypes: ['SPOT','MARGIN','USDT_FUTURES','COIN_FUTURES'], hedgeMode: true, modifyOrder: false, batchOrders: true, trailingStop: true, openInterest: true, fundingRate: true },
@@ -56,17 +56,54 @@ export function resolveMarketSymbol(markets: Record<string, CcxtMarketLike>, sym
 
 export function bareSymbol(symbol: string): string { return symbol.split(':')[0] ?? ''; }
 
+export function buildCcxtMarkets(infos: MarketInfo[]): Record<string, unknown> {
+  const markets: Record<string, unknown> = {};
+  for (const m of infos) {
+    const contract = m.type === 'swap' || m.type === 'future' || m.type === 'delivery' || m.type === 'perpetual' || m.type === 'option';
+    const spot = m.type === 'spot' || m.type === 'margin';
+    const settle = contract ? (m.settle ?? (m.linear === false ? m.base : m.quote)) : undefined;
+    const linear = contract ? (m.linear ?? !(settle === m.base)) : false;
+    const precision: Record<string, number> = {};
+    if (m.amountStep != null && Number.isFinite(m.amountStep) && m.amountStep > 0) precision.amount = m.amountStep;
+    if (m.priceStep != null && Number.isFinite(m.priceStep) && m.priceStep > 0) precision.price = m.priceStep;
+    const limits: Record<string, { min?: number }> = {};
+    if (m.amountMin != null && Number.isFinite(m.amountMin) && m.amountMin > 0) limits.amount = { min: m.amountMin };
+    if (m.priceMin != null && Number.isFinite(m.priceMin) && m.priceMin > 0) limits.price = { min: m.priceMin };
+    markets[m.symbol] = {
+      id: m.id,
+      symbol: m.symbol,
+      base: m.base,
+      quote: m.quote,
+      ...(settle !== undefined ? { settle } : {}),
+      baseId: m.base,
+      quoteId: m.quote,
+      type: m.type,
+      spot,
+      contract,
+      linear,
+      inverse: contract && !linear,
+      active: m.active !== false,
+      precision,
+      limits,
+    };
+  }
+  return markets;
+}
+
 export class CcxtExchangeAdapter implements ExchangeAdapter {
   readonly capabilities: AdapterCapabilities;
   private client?: Exchange;
   private credentialsKey?: string;
   constructor(public readonly id: ExchangeId, private readonly marketType: MarketType) { this.capabilities = capabilities[id]; }
 
-  async connect(credentials: ExchangeCredentials): Promise<ExchangeConnection> {
+  async connect(credentials: ExchangeCredentials, options?: ExchangeConnectOptions): Promise<ExchangeConnection> {
     const Constructor = ccxt[ccxtNames[this.id]] as unknown as new (config: Record<string, unknown>) => Exchange;
     this.credentialsKey = positionModeKey(credentials.testnet, credentials.apiKey);
     const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
-    this.client = new Constructor({ apiKey: credentials.apiKey, secret: credentials.secret, password: credentials.passphrase, walletAddress: credentials.walletAddress, privateKey: credentials.privateKey, enableRateLimit: true, options: { defaultType: this.defaultType(), fetchOpenOrders: { warnWithoutSymbol: false }, ...(this.id === 'bybit' ? { recvWindow: 60000, adjustForTimeDifference: true } : {}) }, ...(proxy ? { httpsProxy: proxy } : {}) });
+    const config: Record<string, unknown> = { apiKey: credentials.apiKey, secret: credentials.secret, password: credentials.passphrase, walletAddress: credentials.walletAddress, privateKey: credentials.privateKey, enableRateLimit: true, options: { defaultType: this.defaultType(), fetchOpenOrders: { warnWithoutSymbol: false }, ...(this.id === 'bybit' ? { recvWindow: 60000, adjustForTimeDifference: true } : {}) } };
+    if (proxy) config.httpsProxy = proxy;
+    if (options?.markets?.length) config.markets = buildCcxtMarkets(options.markets);
+    this.client = new Constructor(config);
     if (credentials.testnet) this.client.setSandboxMode(true);
     try {
       let lastError: unknown;
@@ -74,8 +111,8 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
         try {
           await this.client.loadMarkets();
           if (this.id === 'bybit') await this.client.loadTimeDifference();
-          const fetchedServerTime = this.client.has.fetchTime ? await this.client.fetchTime() : undefined;
-          const serverTime = typeof fetchedServerTime === 'number' ? fetchedServerTime : Date.now();
+          const timeDifference = this.client.options?.timeDifference;
+          const serverTime = typeof timeDifference === 'number' ? Date.now() + timeDifference : Date.now();
           await this.client.fetchBalance();
           return { connected: true, serverTime: new Date(serverTime).toISOString(), permissions: ['read', 'trade'] };
         } catch (error) {
@@ -116,11 +153,12 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
       }));
     } catch (error) { throw this.normalize(error); }
   }
-  async getMarkets(): Promise<MarketInfo[]> {
+  async getMarkets(reload = false): Promise<MarketInfo[]> {
     const client = this.requireClient();
     if (!client.has.fetchMarkets) return [];
     try {
-      const markets = await client.fetchMarkets();
+      const loaded = reload ? await client.loadMarkets(true) : await client.fetchMarkets();
+      const markets = Array.isArray(loaded) ? loaded : Object.values(loaded);
       const result: MarketInfo[] = [];
       for (const market of markets) {
         if (!market || market.active === false) continue;
@@ -131,7 +169,9 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
         const amountMin = (market.limits as { amount?: { min?: number | string } } | undefined)?.amount?.min;
         const priceMin = (market.limits as { price?: { min?: number | string } } | undefined)?.price?.min;
         result.push({
-          symbol: String(market.symbol ?? ''), base: String(market.base ?? ''), quote: String(market.quote ?? ''), type: String(market.type).toLowerCase() as MarketInfo['type'], active: true,
+          symbol: String(market.symbol ?? ''), id: String(market.id ?? market.symbol ?? ''), base: String(market.base ?? ''), quote: String(market.quote ?? ''), type: String(market.type).toLowerCase() as MarketInfo['type'], active: true,
+          ...(market.linear !== undefined ? { linear: Boolean(market.linear) } : {}),
+          ...(market.settle != null ? { settle: String(market.settle) } : {}),
           ...(amountStep !== undefined && Number.isFinite(amountStep) && amountStep > 0 ? { amountStep } : {}),
           ...(priceStep !== undefined && Number.isFinite(priceStep) && priceStep > 0 ? { priceStep } : {}),
           ...(amountMin !== undefined && Number.isFinite(Number(amountMin)) && Number(amountMin) > 0 ? { amountMin: Number(amountMin) } : {}),

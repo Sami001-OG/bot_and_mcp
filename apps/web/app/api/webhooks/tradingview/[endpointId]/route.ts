@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { CommandError, processWebhookSignal } from '@platform/commands';
+import { after } from 'next/server';
+import { CommandError, executeWebhookSignal, verifyWebhookSignal } from '@platform/commands';
 import { errorResponse } from '../../../../../lib/route';
 
 export const runtime = 'nodejs';
@@ -14,9 +15,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (requireSignature && !signature) {
     return NextResponse.json({ message: 'Missing x-tradingview-signature header' }, { status: 401 });
   }
+  let verified: { deliveryId: string; signal: import('@platform/contracts').TradingViewSignal };
   try {
-    const result = await processWebhookSignal({ endpointId, rawBody, signature });
-    return NextResponse.json(result, { status: 202 });
+    const result = await verifyWebhookSignal({ endpointId, rawBody, signature });
+    verified = result;
   } catch (error) {
     if (error instanceof CommandError && error.statusCode < 500) {
       return errorResponse(error);
@@ -26,4 +28,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
     return errorResponse(error);
   }
+  after(async () => {
+    try {
+      await executeWebhookSignal({ deliveryId: verified.deliveryId, endpointId, signal: verified.signal });
+    } catch (error) {
+      console.error(JSON.stringify({ level: 'error', event: 'webhook-execute', endpointId, deliveryId: verified.deliveryId, error: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  return NextResponse.json({ deliveryId: verified.deliveryId, status: 'ACCEPTED' }, { status: 202 });
+}
+
+export async function GET(): Promise<NextResponse> {
+  return NextResponse.json({ ok: true, ts: new Date().toISOString() });
 }
