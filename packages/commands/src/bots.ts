@@ -141,10 +141,10 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
       ...(signal.breakeven ? { breakeven: signal.breakeven } : {}),
       ...(signal.partialTps ? { partialTps: signal.partialTps } : {})
     };
-    const runMarketType = signal.action === 'MANAGE' ? undefined : marketTypeForSymbol(signal.symbol);
+    const runMarketType = marketTypeForSymbol(signal.symbol);
     session = await connectToAccount(bot.exchangeAccountId ?? undefined, runMarketType, accountConfig);
     if (signal.action === 'MANAGE') {
-      const managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config });
+      const managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config, marketType: runMarketType });
       runMetrics.managed = managed as unknown as Prisma.InputJsonValue;
       runMetrics.orders = [];
       await prisma.botRun.update({ where: { id: run.id }, data: { status: 'STOPPED', stoppedAt: new Date(), metrics: runMetrics as unknown as Prisma.InputJsonValue } });
@@ -154,15 +154,23 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
     const equity = settings.equity ?? '0';
     const maxEquity = settings.peakEquity ?? equity;
     const quote = (signal.symbol.split('/')[1] ?? 'USDT').split(':')[0] ?? 'USDT';
-    const [price, balance, position, precision] = await Promise.all([
+    const base = (signal.symbol.split('/')[0] ?? '').split(':')[0] ?? '';
+    const [price, balances, position, precision] = await Promise.all([
       session.adapter.getPrice(signal.symbol).catch(() => undefined),
-      session.adapter.getBalance().catch(() => []).then((balances) => balances.find((entry) => entry.asset.toUpperCase() === quote.toUpperCase())),
+      session.adapter.getBalance().catch(() => []),
       session.adapter.getPositions().catch(() => []).then((positions) => positions.find((entry) => entry.symbol.toUpperCase() === (signal.symbol.split(':')[0] ?? signal.symbol).toUpperCase())),
       marketPrecisionOf(session.adapter, signal.symbol).catch(() => null),
     ]);
     let currentPositionSide: PositionSide | undefined;
     let positionQuantity: number | undefined;
-    if (position && position.side !== 'BOTH') { currentPositionSide = position.side; positionQuantity = Number(position.quantity); }
+    if (position && position.side !== 'BOTH') {
+      currentPositionSide = position.side;
+      positionQuantity = Number(position.quantity);
+    } else if (runMarketType === 'SPOT' && base) {
+      const holding = balances.find((entry) => entry.asset.toUpperCase() === base.toUpperCase());
+      const free = Number(holding?.free ?? 0);
+      if (Number.isFinite(free) && free > 0) { currentPositionSide = 'LONG'; positionQuantity = free; }
+    }
     const result = buildWebhookOrders({ signal, config, account: { id: accountConfig.id, exchange: accountConfig.exchange, marketType: accountConfig.marketType }, botId: bot.id, ...(price === undefined ? {} : { price }), ...(positionQuantity === undefined ? {} : { positionQuantity }), equity, maxEquity, ...(currentPositionSide === undefined ? {} : { currentPositionSide }), ...(precision ? { precision } : {}) });
     const created: string[] = [];
     const orderResults: BotRunResult['orderResults'] = [];
@@ -188,7 +196,7 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
     const effectiveConfig = mergeManagementOverrides(config, overrides);
     if (effectiveConfig.dca?.enabled || effectiveConfig.breakeven?.enabled || effectiveConfig.partialTps?.enabled) {
       try {
-        managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config });
+        managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config, marketType: runMarketType });
         runMetrics.managed = managed as unknown as Prisma.InputJsonValue;
       } catch (error) {
         runMetrics.managedError = error instanceof Error ? error.message.slice(0, 300) : String(error);

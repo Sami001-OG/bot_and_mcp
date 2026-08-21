@@ -1,14 +1,22 @@
 import { prisma } from '@platform/database';
 import { ExchangeError } from '@platform/exchange-core';
+import { MarketType, type MarketType as MarketTypeT } from '@platform/contracts';
 import { connectToAccount, getAccountConfig } from './account.js';
 import { listExchangeMarkets } from './markets.js';
+import { CommandError } from './errors.js';
 
 export { listExchangeMarkets };
 
 export async function portfolioSummary(marketType?: string) {
   const config = await getAccountConfig();
+  let resolvedType: MarketTypeT | undefined;
+  if (marketType !== undefined && marketType !== '') {
+    const parsed = MarketType.safeParse(marketType.toUpperCase());
+    if (!parsed.success) throw new CommandError(400, 'VALIDATION_ERROR', `Unsupported market type "${marketType}"`);
+    resolvedType = parsed.data;
+  }
   try {
-    const { adapter, connection } = await connectToAccount(undefined, marketType as never);
+    const { adapter, connection } = await connectToAccount(undefined, resolvedType);
     try {
       const [balances, positions] = await Promise.all([adapter.getBalance(), adapter.getPositions()]);
       const unrealizedPnl = positions.reduce((sum, position) => sum + Number(position.unrealizedPnl), 0);

@@ -181,5 +181,8 @@ describe('commands', () => {
     expect(marketTypeForSymbol('SOL/USDT')).toBe('SPOT');
     expect(marketTypeForSymbol('DOGE/USDT:USDT')).toBe('USDT_FUTURES');
     expect(marketTypeForSymbol('DOGE/USDT')).toBe('SPOT');
+    expect(marketTypeForSymbol('BTC/USD:BTCUSD')).toBe('COIN_FUTURES');
+    expect(marketTypeForSymbol('ETH/USD:ETHUSD')).toBe('COIN_FUTURES');
+    expect(marketTypeForSymbol('SOL/USDT:SOL')).toBe('COIN_FUTURES');
   });
 });

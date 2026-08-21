@@ -1,5 +1,5 @@
 import { Prisma } from '@platform/database';
-import { MIN_ORDER_NOTIONAL_USD, type BreakevenConfig, type DcaConfig, type ManagementOverrides, type PartialTpsConfig, type ResolvedOrderRequest, type WebhookBotConfig } from '@platform/contracts';
+import { MIN_ORDER_NOTIONAL_USD, marketTypeForSymbol, type BreakevenConfig, type DcaConfig, type ManagementOverrides, type MarketType, type PartialTpsConfig, type ResolvedOrderRequest, type WebhookBotConfig } from '@platform/contracts';
 import { alignAmount } from '@platform/trading-core';
 import { evaluateOrder } from '@platform/risk-engine';
 import { prisma } from '@platform/database';
@@ -9,7 +9,7 @@ import { executeOrderNow, persistOrder } from './execute.js';
 import { loadPolicy } from './orders.js';
 import { type ExchangeAdapter } from '@platform/exchange-core';
 
-export type ManageSession = { config?: AccountConfig; adapter?: ExchangeAdapter; botConfig?: WebhookBotConfig };
+export type ManageSession = { config?: AccountConfig; adapter?: ExchangeAdapter; botConfig?: WebhookBotConfig; marketType?: MarketType };
 
 export type ManageState = {
   dca: Record<string, { steps: number }>;
@@ -77,10 +77,25 @@ type ManageCtx = {
   entry: number;
   mark: number;
   precision: Awaited<ReturnType<typeof marketPrecisionOf>>;
+  marketType: MarketType;
   cancelOpenOrders: (prefix: string) => Promise<string[]>;
   openOrders: Array<{ id: string; symbol: string }>;
   openByClientOrderId: Set<string>;
 };
+
+function neededMarketTypes(symbols: string[], fallback: MarketType): MarketType[] {
+  const set = new Set<MarketType>();
+  for (const entry of symbols) {
+    if (entry === '*') { set.add('SPOT'); set.add('USDT_FUTURES'); continue; }
+    set.add(marketTypeForSymbol(entry));
+  }
+  if (set.size === 0) set.add(fallback);
+  return [...set];
+}
+
+function minNotionalOf(marketType: MarketType): string {
+  return MIN_ORDER_NOTIONAL_USD[marketType] ?? MIN_ORDER_NOTIONAL_USD.USDT_FUTURES;
+}
 
 async function placeManagedOrder(input: {
   botId: string;
@@ -92,6 +107,7 @@ async function placeManagedOrder(input: {
   stopPrice?: string;
   reduceOnly: boolean;
   quantity: string;
+  marketType: MarketType;
   feature: 'breakeven' | 'tp' | 'dca';
 }, session: ManageSession): Promise<{ placed: boolean; filled: boolean; error?: string }> {
   try {
@@ -108,7 +124,7 @@ async function placeManagedOrder(input: {
         clientOrderId: input.clientOrderId,
         idempotencyKey: input.idempotencyKey,
       },
-      { source: { kind: 'bot-manage', feature: input.feature, botId: input.botId } },
+      { source: { kind: 'bot-manage', feature: input.feature, botId: input.botId }, marketType: input.marketType },
       session.config,
     );
     if (!created) return { placed: false, filled: false, error: 'duplicate idempotency key; order already exists' };
@@ -144,100 +160,109 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
 
   const state = await loadState(botId);
   const policy = await loadPolicy().catch(() => null);
-  let adapter: ExchangeAdapter;
-  let ownsAdapter = false;
+  const runs: Array<{ adapter: ExchangeAdapter; marketType: MarketType; disconnect: boolean }> = [];
   if (session?.adapter) {
-    adapter = session.adapter;
+    runs.push({ adapter: session.adapter, marketType: session.marketType ?? ctx.account.marketType, disconnect: false });
   } else {
-    const connection = await connectToAccount(ctx.account.id);
-    adapter = connection.adapter;
-    ownsAdapter = true;
-  }
-  const sessionCtx: ManageSession = { ...(session?.config ? { config: session.config } : {}), adapter };
-  try {
-    const positions = await adapter.getPositions();
-    const openOrders = await adapter.getOrders().catch(() => []);
-    const balances = await adapter.getBalance().catch(() => []);
-    const cancelOpenOrders = async (prefix: string): Promise<string[]> => {
-      const canceled: string[] = [];
-      for (const order of openOrders) {
-        if (!order.clientOrderId || !order.clientOrderId.startsWith(prefix)) continue;
-        try {
-          await adapter.cancelOrder(order.id, order.symbol);
-          canceled.push(order.clientOrderId);
-        } catch {
-          /* leave the order in place */
-        }
-      }
-      return canceled;
-    };
-    const openByClientOrderId = new Set(openOrders.map((order) => order.clientOrderId).filter(Boolean));
-
-    for (const position of positions) {
-      if (!ctx.config.symbols.some((entry) => entry === '*' || entry.toUpperCase().split(':')[0] === position.symbol.toUpperCase())) continue;
-      const side = position.side;
-      if (side !== 'LONG' && side !== 'SHORT') continue;
-      const quantity = Number(position.quantity);
-      const entry = Number(position.entryPrice);
-      const mark = Number(position.markPrice);
-      if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(entry) || entry <= 0 || !Number.isFinite(mark) || mark <= 0) continue;
-      result.positions += 1;
-      const key = symbolKey(position.symbol);
-      const precision = await marketPrecisionOf(adapter, position.symbol).catch(() => null);
-      const quote = (position.symbol.split('/')[1] ?? 'USDT').split(':')[0];
-      const balance = balances.find((entry) => entry.asset === quote);
-      const equity = balance ? Number(balance.total) : 0;
-      const closeSide: 'BUY' | 'SELL' = side === 'LONG' ? 'SELL' : 'BUY';
-      const current = {
-        dca: state.dca[key] ?? { steps: 0 },
-        breakeven: state.breakeven[key] ?? { applied: false },
-        tps: state.tps[key] ?? { claimed: [], placed: [] },
-      };
-      state.dca[key] = current.dca;
-      state.breakeven[key] = current.breakeven;
-      state.tps[key] = current.tps;
-      const dcaOut = result.dca;
-      const brOut = result.breakeven;
-      const tpsOut = result.tps;
-      const ctxForSymbol: ManageCtx = {
-        botId,
-        position: { symbol: position.symbol, side, quantity: position.quantity },
-        closeSide,
-        entry,
-        mark,
-        precision,
-        cancelOpenOrders,
-        openOrders,
-        openByClientOrderId,
-      };
-
-      if (brCfg && brOut) {
-        const br = await applyBreakeven(ctxForSymbol, brCfg, current.breakeven, sessionCtx);
-        if (br.error) brOut.errors.push(br.error);
-        else if (br.moved) brOut.moved.push(br.moved);
-        else if (br.skipped) brOut.skipped.push(br.skipped);
-      }
-
-      if (tpsCfg && tpsOut) {
-        const tp = await applyPartialTps(ctxForSymbol, tpsCfg, current.tps, MIN_ORDER_NOTIONAL_USD[ctx.account.marketType], sessionCtx);
-        tpsOut.claimed.push(...tp.claimed);
-        tpsOut.placed.push(...tp.placed);
-        tpsOut.skipped.push(...tp.skipped);
-        tpsOut.errors.push(...tp.errors);
-      }
-
-      if (dcaCfg && dcaOut) {
-        const dca = await applyDca(ctxForSymbol, dcaCfg, current.dca, equity, policy, ctx.account.exchange, ctx.account.marketType, MIN_ORDER_NOTIONAL_USD[ctx.account.marketType], sessionCtx);
-        dcaOut.placed.push(...dca.placed);
-        dcaOut.skipped.push(...dca.skipped);
-        dcaOut.errors.push(...dca.errors);
-        dcaOut.steps += dca.steps;
+    for (const marketType of neededMarketTypes(ctx.config.symbols, ctx.account.marketType)) {
+      try {
+        const connection = await connectToAccount(ctx.account.id, marketType);
+        runs.push({ adapter: connection.adapter, marketType, disconnect: true });
+      } catch (error) {
+        result.errors.push(`${marketType} connection failed: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`);
       }
     }
-  } catch (error) {
-    result.errors.push(error instanceof Error ? error.message.slice(0, 300) : String(error));
-  } finally {
-    if (ownsAdapter) await adapter.disconnect().catch(() => undefined);
+  }
+  for (const run of runs) {
+    const adapter = run.adapter;
+    const sessionCtx: ManageSession = { ...(ctx.account ? { config: ctx.account } : {}), adapter };
+    try {
+      const positions = await adapter.getPositions();
+      const openOrders = await adapter.getOrders().catch(() => []);
+      const balances = await adapter.getBalance().catch(() => []);
+      const cancelOpenOrders = async (prefix: string): Promise<string[]> => {
+        const canceled: string[] = [];
+        for (const order of openOrders) {
+          if (!order.clientOrderId || !order.clientOrderId.startsWith(prefix)) continue;
+          try {
+            await adapter.cancelOrder(order.id, order.symbol);
+            canceled.push(order.clientOrderId);
+          } catch {
+            /* leave the order in place */
+          }
+        }
+        return canceled;
+      };
+      const openByClientOrderId = new Set(openOrders.map((order) => order.clientOrderId).filter(Boolean));
+
+      for (const position of positions) {
+        if (!ctx.config.symbols.some((entry) => entry === '*' || entry.toUpperCase().split(':')[0] === position.symbol.toUpperCase())) continue;
+        const side = position.side;
+        if (side !== 'LONG' && side !== 'SHORT') continue;
+        const quantity = Number(position.quantity);
+        const entry = Number(position.entryPrice);
+        const mark = Number(position.markPrice);
+        if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(entry) || entry <= 0 || !Number.isFinite(mark) || mark <= 0) continue;
+        result.positions += 1;
+        const key = symbolKey(position.symbol);
+        const precision = await marketPrecisionOf(adapter, position.symbol).catch(() => null);
+        const quote = (position.symbol.split('/')[1] ?? 'USDT').split(':')[0];
+        const balance = balances.find((entry) => entry.asset === quote);
+        const equity = balance ? Number(balance.total) : 0;
+        const closeSide: 'BUY' | 'SELL' = side === 'LONG' ? 'SELL' : 'BUY';
+        const minNotional = minNotionalOf(run.marketType);
+        const current = {
+          dca: state.dca[key] ?? { steps: 0 },
+          breakeven: state.breakeven[key] ?? { applied: false },
+          tps: state.tps[key] ?? { claimed: [], placed: [] },
+        };
+        state.dca[key] = current.dca;
+        state.breakeven[key] = current.breakeven;
+        state.tps[key] = current.tps;
+        const dcaOut = result.dca;
+        const brOut = result.breakeven;
+        const tpsOut = result.tps;
+        const ctxForSymbol: ManageCtx = {
+          botId,
+          position: { symbol: position.symbol, side, quantity: position.quantity },
+          closeSide,
+          entry,
+          mark,
+          precision,
+          marketType: run.marketType,
+          cancelOpenOrders,
+          openOrders,
+          openByClientOrderId,
+        };
+
+        if (brCfg && brOut) {
+          const br = await applyBreakeven(ctxForSymbol, brCfg, current.breakeven, sessionCtx);
+          if (br.error) brOut.errors.push(br.error);
+          else if (br.moved) brOut.moved.push(br.moved);
+          else if (br.skipped) brOut.skipped.push(br.skipped);
+        }
+
+        if (tpsCfg && tpsOut) {
+          const tp = await applyPartialTps(ctxForSymbol, tpsCfg, current.tps, minNotional, sessionCtx);
+          tpsOut.claimed.push(...tp.claimed);
+          tpsOut.placed.push(...tp.placed);
+          tpsOut.skipped.push(...tp.skipped);
+          tpsOut.errors.push(...tp.errors);
+        }
+
+        if (dcaCfg && dcaOut) {
+          const dca = await applyDca(ctxForSymbol, dcaCfg, current.dca, equity, policy, minNotional, sessionCtx);
+          dcaOut.placed.push(...dca.placed);
+          dcaOut.skipped.push(...dca.skipped);
+          dcaOut.errors.push(...dca.errors);
+          dcaOut.steps += dca.steps;
+        }
+      }
+    } catch (error) {
+      result.errors.push(error instanceof Error ? error.message.slice(0, 300) : String(error));
+    } finally {
+      if (run.disconnect) await adapter.disconnect().catch(() => undefined);
+    }
   }
 
   await saveState(botId, state).catch((error) => {
@@ -288,6 +313,7 @@ async function applyBreakeven(input: ManageCtx, cfg: BreakevenConfig, stateEntry
     stopPrice: target.toFixed(8),
     reduceOnly: true,
     quantity: input.position.quantity,
+    marketType: input.marketType,
     feature: 'breakeven',
   }, session);
   if (outcome.error) return { error: `${input.position.symbol}: breakeven SL failed (${outcome.error})` };
@@ -329,6 +355,7 @@ async function applyPartialTps(input: ManageCtx, cfg: PartialTpsConfig, stateEnt
         type: 'MARKET',
         reduceOnly: true,
         quantity: String(portionQty),
+        marketType: input.marketType,
         feature: 'tp',
       }, session);
       if (outcome.error) { out.errors.push(`${input.position.symbol}: TP${index + 1} claim failed (${outcome.error})`); continue; }
@@ -354,6 +381,7 @@ async function applyPartialTps(input: ManageCtx, cfg: PartialTpsConfig, stateEnt
         stopPrice: trigger.toFixed(8),
         reduceOnly: true,
         quantity: String(portionQty),
+        marketType: input.marketType,
         feature: 'tp',
       }, session);
       if (outcome.error) { out.errors.push(`${input.position.symbol}: TP${index + 1} order failed (${outcome.error})`); continue; }
@@ -366,7 +394,7 @@ async function applyPartialTps(input: ManageCtx, cfg: PartialTpsConfig, stateEnt
   return out;
 }
 
-async function applyDca(input: ManageCtx, cfg: DcaConfig, stateEntry: ManageState['dca'][string], equity: number, policy: Awaited<ReturnType<typeof loadPolicy>> | null, exchange: string, marketType: string, minNotional: string, session: ManageSession): Promise<{ steps: number; placed: string[]; skipped: string[]; errors: string[] }> {
+async function applyDca(input: ManageCtx, cfg: DcaConfig, stateEntry: ManageState['dca'][string], equity: number, policy: Awaited<ReturnType<typeof loadPolicy>> | null, minNotional: string, session: ManageSession): Promise<{ steps: number; placed: string[]; skipped: string[]; errors: string[] }> {
   const out = { steps: 0, placed: [] as string[], skipped: [] as string[], errors: [] as string[] };
   const long = input.position.side === 'LONG';
   const dropPct = long ? (input.entry - input.mark) / input.entry * 100 : (input.mark - input.entry) / input.entry * 100;
@@ -387,7 +415,7 @@ async function applyDca(input: ManageCtx, cfg: DcaConfig, stateEntry: ManageStat
   }
   if (policy) {
     const risk = evaluateOrder({
-      exchangeAccountId: '', exchange: exchange as never, marketType: marketType as never,
+      exchangeAccountId: '', exchange: 'bybit' as never, marketType: input.marketType as never,
       symbol: input.position.symbol, side: long ? 'BUY' : 'SELL', positionSide: input.position.side,
       type: 'MARKET', quantity: String(qty), reduceOnly: false, postOnly: false, timeInForce: 'GTC',
       clientOrderId: 'risk-check', idempotencyKey: `risk:${input.botId}:${Date.now()}`,
@@ -404,6 +432,7 @@ async function applyDca(input: ManageCtx, cfg: DcaConfig, stateEntry: ManageStat
     type: 'MARKET',
     reduceOnly: false,
     quantity: String(qty),
+    marketType: input.marketType,
     feature: 'dca',
   }, session);
   if (outcome.error) { out.errors.push(`${input.position.symbol}: DCA step ${nextStep} failed (${outcome.error})`); return out; }

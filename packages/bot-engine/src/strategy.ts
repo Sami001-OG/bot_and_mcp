@@ -170,7 +170,7 @@ export class WebhookSignalStrategy implements TradingStrategy {
     if (!raw) return { orders: [], state: { ...context.state }, logs: ['No signal payload in tick indicators'] };
     try {
       const signal = TradingViewSignalSchema.parse(JSON.parse(raw));
-      const account = { id: context.exchangeAccountId, exchange: context.tick.symbol.split('/')[1]?.split(':')[0]?.toLowerCase() ?? 'bybit', marketType: 'USDT_FUTURES' as MarketType };
+      const account = { id: context.exchangeAccountId, exchange: 'bybit', marketType: marketTypeForSymbol(signal.symbol) };
       const result = buildWebhookOrders({ signal, config: this.config, account, price: context.tick.price, equity: '0', maxEquity: '0' });
       return { orders: result.orders.map((order) => ({ ...order, exchange: order.exchange as OrderRequest['exchange'], marketType: order.marketType as OrderRequest['marketType'], positionSide: order.positionSide as OrderRequest['positionSide'], type: order.type as OrderRequest['type'], timeInForce: 'GTC' as const, clientOrderId: `${order.clientOrderId}-${context.botId.slice(0, 8)}`, idempotencyKey: `${order.idempotencyKey}:${context.botId.slice(0, 8)}` })), state: { ...context.state, lastSignal: signal.nonce }, logs: [...result.notes, ...result.skipped] };
     } catch {

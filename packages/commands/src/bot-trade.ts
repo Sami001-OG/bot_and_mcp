@@ -97,8 +97,9 @@ export async function closePositionThroughBot(botId: string, symbol: string): Pr
   const ctx = await getBotTradeContext(botId);
   const normalized = String(symbol).toUpperCase();
   assertBotSymbol(ctx, normalized);
+  const marketType = marketTypeForSymbol(normalized);
   let position: { symbol: string; side: 'LONG' | 'SHORT'; quantity: string; entryPrice: string } | undefined;
-  const session = await connectToAccount(ctx.account.id);
+  const session = await connectToAccount(ctx.account.id, marketType);
   try {
     const found = (await session.adapter.getPositions()).find((entry) => entry.symbol.toUpperCase() === normalized.split(':')[0]);
     if (found) position = { symbol: found.symbol, side: found.side as 'LONG' | 'SHORT', quantity: String(found.quantity), entryPrice: String(found.entryPrice) };
@@ -109,7 +110,7 @@ export async function closePositionThroughBot(botId: string, symbol: string): Pr
   const request: OrderRequest = {
     exchangeAccountId: ctx.account.id,
     exchange: ctx.account.exchange as ExchangeId,
-    marketType: ctx.account.marketType,
+    marketType,
     symbol: normalized,
     side: position.side === 'LONG' ? 'SELL' : 'BUY',
     positionSide: position.side,
@@ -135,7 +136,9 @@ export async function changeLeverageThroughBot(botId: string, symbol: string, le
   const ctx = await getBotTradeContext(botId);
   const normalized = String(symbol).toUpperCase();
   assertBotSymbol(ctx, normalized);
-  const session = await connectToAccount(ctx.account.id);
+  const marketType = marketTypeForSymbol(normalized);
+  if (marketType === 'SPOT') throw new CommandError(400, 'LEVERAGE_UNSUPPORTED_SPOT', `Leverage is not supported on spot market ${normalized}`);
+  const session = await connectToAccount(ctx.account.id, marketType);
   try {
     const result = await session.adapter.setLeverage(normalized, leverage);
     return { ok: true, symbol: normalized, leverage: result.leverage, updatedAt: new Date().toISOString() };

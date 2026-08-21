@@ -8,7 +8,11 @@ export const MarketType = z.enum(['SPOT', 'MARGIN', 'USDT_FUTURES', 'COIN_FUTURE
 export type MarketType = z.infer<typeof MarketType>;
 
 export function marketTypeForSymbol(symbol: string): MarketType {
-  return symbol.includes(':') ? 'USDT_FUTURES' : 'SPOT';
+  const colonIndex = symbol.indexOf(':');
+  if (colonIndex === -1) return 'SPOT';
+  const quote = symbol.slice(0, colonIndex).split('/')[1];
+  const settle = symbol.slice(colonIndex + 1);
+  return quote !== undefined && settle.toUpperCase() === quote.toUpperCase() ? 'USDT_FUTURES' : 'COIN_FUTURES';
 }
 export const OrderSide = z.enum(['BUY', 'SELL']);
 export type OrderSide = z.infer<typeof OrderSide>;

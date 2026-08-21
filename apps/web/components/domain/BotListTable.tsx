@@ -97,7 +97,7 @@ export function BotListTable({
                   </Td>
                   <Td data-label="Version">v{bot.activeVersion}</Td>
                   <Td data-label="Config" className="config-cell" title={formatConfig(bot.config)}>{formatConfig(bot.config)}</Td>
-                  <Td data-label="Actions" className="row-actions" onMouseDown={(event) => event.stopPropagation()}>
+                  <Td data-label="Actions" className="row-actions" onClick={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
                     {bot.status !== 'ACTIVE' && <button className="icon-btn safe" onClick={() => onResume(bot)} title="Resume" type="button"><Play size={14} /></button>}
                     {bot.status === 'ACTIVE' && <button className="icon-btn" onClick={() => onPause(bot)} title="Pause" type="button"><Pause size={14} /></button>}
                     <button className="icon-btn" onClick={() => onEdit(bot)} title="Edit config" type="button"><Settings2 size={14} /></button>

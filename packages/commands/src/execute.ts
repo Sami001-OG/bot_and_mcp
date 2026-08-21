@@ -292,43 +292,49 @@ export async function cancelOrderNow(orderId: string): Promise<{ orderId: string
 export type CloseAllResult = { canceled: number; cancelFailures: string[]; dbOrdersCanceled: number; positionsToClose: number; closed: number; closeFailures: string[] };
 
 export async function closeAllNow(accountId?: string): Promise<CloseAllResult> {
-  let adapter: ExchangeAdapter | undefined;
-  try {
-    const session = await connectToAccount(accountId);
-    adapter = session.adapter;
-    const openOrders = await adapter.getOrders();
-    const cancelFailures: string[] = [];
-    let canceled = 0;
-    for (const openOrder of openOrders) {
-      try {
-        await adapter.cancelOrder(openOrder.id, openOrder.symbol);
-        canceled += 1;
-      } catch (error) {
-        cancelFailures.push(`${openOrder.id}: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`);
-      }
+  const cancelFailures: string[] = [];
+  const closeFailures: string[] = [];
+  let canceled = 0;
+  let closed = 0;
+  let positionsToClose = 0;
+  for (const marketType of ['SPOT', 'USDT_FUTURES'] as MarketType[]) {
+    let adapter: ExchangeAdapter | undefined;
+    try {
+      const session = await connectToAccount(accountId, marketType);
+      adapter = session.adapter;
+    } catch {
+      continue;
     }
-    const affected = await prisma.orderIntent.updateMany({ where: { state: { in: ['ACKNOWLEDGED', 'QUEUED', 'SUBMITTING', 'PARTIALLY_FILLED', 'CANCEL_PENDING'] } }, data: { state: 'CANCELED' } });
-    const positions = await adapter.getPositions();
-    const closeFailures: string[] = [];
-    let closed = 0;
-    for (const position of positions) {
-      const opposite: 'BUY' | 'SELL' = position.side === 'LONG' ? 'SELL' : 'BUY';
-      const idempotencyKey = `close-${position.symbol}-${Date.now()}-${closed}`;
-      const clientOrderId = `close-${Date.now()}-${closed}`;
-      try {
-        const { order, created } = await persistOrder({ symbol: position.symbol, side: opposite, positionSide: 'BOTH', type: 'MARKET', quantity: position.quantity, reduceOnly: true, postOnly: false, clientOrderId, idempotencyKey }, { state: 'QUEUED', ...(accountId ? { exchangeAccountId: accountId } : {}) });
-        if (created) await executeOrderNow(order.id);
-        closed += 1;
-      } catch (error) {
-        closeFailures.push(`${position.symbol}: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`);
+    try {
+      const openOrders = await adapter.getOrders().catch(() => []);
+      for (const openOrder of openOrders) {
+        try {
+          await adapter.cancelOrder(openOrder.id, openOrder.symbol);
+          canceled += 1;
+        } catch (error) {
+          cancelFailures.push(`${openOrder.symbol} ${openOrder.id}: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`);
+        }
       }
+      const positions = await adapter.getPositions().catch(() => []);
+      positionsToClose += positions.length;
+      for (const position of positions) {
+        const opposite: 'BUY' | 'SELL' = position.side === 'LONG' ? 'SELL' : 'BUY';
+        const idempotencyKey = `close-${marketType.toLowerCase()}-${position.symbol}-${Date.now()}-${closed}`;
+        const clientOrderId = `close-${marketType === 'SPOT' ? 'sp' : 'fu'}-${Date.now()}-${closed}`;
+        try {
+          const { order, created } = await persistOrder({ symbol: position.symbol, side: opposite, positionSide: 'BOTH', type: 'MARKET', quantity: position.quantity, reduceOnly: true, postOnly: false, clientOrderId, idempotencyKey }, { state: 'QUEUED', marketType, ...(accountId ? { exchangeAccountId: accountId } : {}) });
+          if (created) await executeOrderNow(order.id);
+          closed += 1;
+        } catch (error) {
+          closeFailures.push(`${position.symbol}: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`);
+        }
+      }
+    } finally {
+      await adapter.disconnect().catch(() => undefined);
     }
-    return { canceled, cancelFailures, dbOrdersCanceled: affected.count, positionsToClose: positions.length, closed, closeFailures };
-  } catch (error) {
-    throw error;
-  } finally {
-    await adapter?.disconnect().catch(() => undefined);
   }
+  const affected = await prisma.orderIntent.updateMany({ where: { state: { in: ['ACKNOWLEDGED', 'QUEUED', 'SUBMITTING', 'PARTIALLY_FILLED', 'CANCEL_PENDING'] } }, data: { state: 'CANCELED' } });
+  return { canceled, cancelFailures, dbOrdersCanceled: affected.count, positionsToClose, closed, closeFailures };
 }
 
 export async function resyncOrderNow(orderId: string): Promise<Record<string, unknown>> {
