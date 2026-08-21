@@ -87,10 +87,11 @@ Bots are the automation unit: they subscribe a set of symbols to a dedicated web
 Go to **Bots** (`/bots`):
 
 - **Create bot** (New bot) — fields:
+  - **Market type** — **Spot** or **Futures (USDT)**, chosen first and fixed permanently for the bot. It decides how symbols are interpreted (bare `BTC/USDT` = spot, `BTC/USDT:USDT` = futures — signals in either format are auto-normalized to the bot's market), whether Leverage and Trailing stop fields appear (futures only), and which markets the symbol picker lists. Switching the toggle drops previously selected symbols from the other market.
   - **Name** — any label, e.g. `btc-breakout`.
   - **Webhook / MCP password** — optional, ≥ 12 chars, chosen by you. This **one** password is both the webhook HMAC signing secret and the per-bot MCP Bearer token. Leave empty to auto-generate. Shown once after creation.
   - **Exchange API** — the account the bot trades with (required, select from your saved accounts).
-  - **Symbols** — one or more, e.g. `BTC/USDT:USDT`, `ETH/USDT:USDT` (futures format `<BASE>/<QUOTE>:<QUOTE>`). Symbols load live from Bybit's market list; if loading fails you'll see an error with a Retry button instead of an infinite spinner.
+  - **Symbols** — one or more, filtered live by the chosen market: spot bots list spot pairs (`BTC/USDT`), futures bots list USDT perpetuals (`BTC/USDT:USDT`). Symbols load live from Bybit's market list; if loading fails you'll see an error with a Retry button instead of an infinite spinner.
   - **Allocation mode** — how order size is derived:
     - `Use signal size` (NONE) — the bot uses `size` from the TradingView alert directly.
     - `PERCENT_EQUITY` — `percent`% of current equity.
@@ -105,7 +106,7 @@ Go to **Bots** (`/bots`):
   - **Allowed signal actions** — checkbox allowlist: `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`. Signals with other actions are ignored.
   - **Position-management capabilities** (evaluated on every bot run, and on demand via the MCP `manageBot` tool, or triggered by the webhook `MANAGE` action; all three work on **both futures and spot** bots — spot positions are tracked via the fill ledger with weighted-average entry prices):
     - > [!TIP]
-      > **Built-in defaults — zero configuration required.** Every bot can DCA, move its stop to breakeven and claim partial take-profits out of the box, even if you never touch these settings. Defaults: **DCA** 3% trigger, $25 fixed steps, max 3 · **Breakeven** move SL at +1.5% · **Partial TPs** close 30% at +2%, 30% at +4%, 40% at +8%. Anything you configure explicitly replaces the default for that capability; set `"enabled": false` (or customize via MCP `updateBotConfig`) to turn one off. Webhook/MCP ephemeral overrides always win for that single run.
+      > **Built-in defaults — zero configuration required.** Every bot can DCA, move its stop to breakeven and claim partial take-profits out of the box, even if you never touch these settings — in the create form, leaving these three sections unchecked means "use the defaults", not "off". Defaults: **DCA** 3% trigger, $25 fixed steps, max 3 · **Breakeven** move SL at +1.5% · **Partial TPs** close 30% at +2%, 30% at +4%, 40% at +8%. Anything you configure explicitly replaces the default for that capability; set `"enabled": false` (or customize via MCP `updateBotConfig`) to turn one off. Webhook/MCP ephemeral overrides always win for that single run.
     - **DCA — average down**: add to a losing position when price drops `triggerDropPercent`% below entry. `stepDropPercent` (optional) spaces subsequent steps further out; each step adds `amount` (fixed $ or % of equity), up to `maxSteps` steps, one step per run. Example: 3% trigger, $50 steps, 3 max → steps at −3%, −6%, −9%.
     - **Breakeven stop-loss move**: when price moves `moveAtProfitPercent`% in favor, the stop loss is moved to entry (or `safeProfitPercent` above/below entry for longs/shorts if set). One move per position — state is tracked per bot.
     - **Partial take-profit claims**: comma-separated `price%:close%` levels, e.g. `2:30, 5:40, 10:30`. When price reaches a level the bot closes that percentage of the position at market (or rests a reduce-only TP trigger order at the level so the claim happens when price arrives). Levels must sum to ≤ 100%.
@@ -835,7 +836,7 @@ The app exposes MCP servers over Streamable HTTP — point any MCP client at the
   - **Protocol**: JSON-RPC 2.0 over streamable HTTP. Supports `initialize`, `tools/list`, `tools/call`, `ping`.
 - **Per-bot servers**: `<origin>/api/mcp/bots/<botId>` — one per bot (see Bots page detail view for the exact URL).
   - **Auth**: `Authorization: Bearer <bot password>` — the password you chose at bot creation (the webhook signing secret). Wrong password → `401`; unknown bot → `404`.
-  - **Tools**: everything except `listAccounts`, `createBot`, `deleteBot`; trade tools (`placeOrder`, `cancelOrder`, `closePosition`, `closeAll`, `changeLeverage`, `manageBot`) run **only on that bot's account** — no `botId` argument needed.
+  - **Tools**: everything except `listAccounts`, `createBot`, `deleteBot`, `updateBotConfig`; trade tools (`placeOrder`, `cancelOrder`, `closePosition`, `closeAll`, `changeLeverage`, `manageBot`) run **only on that bot's account** — no `botId` argument needed.
   - Connect with `npx mcp-remote <origin>/api/mcp/bots/<botId>` and authenticate with the bot password.
 
 ### Tools (24)
