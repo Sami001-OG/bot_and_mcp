@@ -1,4 +1,4 @@
-import { TradingViewSignalSchema, type MarketType, type OrderRequest, type PositionSide, type TradingViewSignal, type WebhookBotAction, type WebhookBotConfig } from '@platform/contracts';
+import { TradingViewSignalSchema, marketTypeForSymbol, type MarketType, type OrderRequest, type PositionSide, type TradingViewSignal, type WebhookBotAction, type WebhookBotConfig } from '@platform/contracts';
 import { alignPrice, sizeOrder, type MarketPrecision } from '@platform/trading-core';
 import type { StrategyContext, StrategyDecision, TradingStrategy } from './index.js';
 
@@ -66,20 +66,23 @@ export function buildWebhookOrders(input: WebhookBuildInput): WebhookBuildResult
   const skipped: string[] = [];
   const push = (order: SizedOrderRequest) => orders.push(order);
 
-  const matchesSymbol = config.symbols.some((entry) => entry === '*' || entry.toUpperCase() === signal.symbol.toUpperCase());
+  const bare = (symbol: string): string => symbol.split(':')[0]?.toUpperCase() ?? symbol.toUpperCase();
+  const signalBare = bare(signal.symbol);
+  const matchesSymbol = config.symbols.some((entry) => entry === '*' || bare(entry) === signalBare);
   if (!matchesSymbol) { skipped.push(`Symbol ${signal.symbol} not in configured bot symbols`); return { orders, notes, skipped }; }
   if (config.actions && !config.actions.includes(signal.action as WebhookBotAction)) { skipped.push(`Action ${signal.action} not in configured bot actions`); return { orders, notes, skipped }; }
   if (signal.exchange.toLowerCase() !== account.exchange.toLowerCase()) { skipped.push(`Exchange ${signal.exchange} does not match bot account ${account.exchange}`); return { orders, notes, skipped }; }
 
   const keyId = `${input.botId ? `${input.botId.slice(0, 8)}-` : ''}${signal.nonce.slice(-8)}`;
-  const base = { exchangeAccountId: account.id, exchange: account.exchange, marketType: account.marketType, symbol: signal.symbol, postOnly: false };
+  const marketType = marketTypeForSymbol(signal.symbol);
+  const base = { exchangeAccountId: account.id, exchange: account.exchange, marketType, symbol: signal.symbol, postOnly: false };
 
   const sizeEntry = (): { quantity: string; leverage?: number } | null => {
     if (!config.allocation) return signal.size ? { quantity: signal.size } : null;
     if (!input.price) { skipped.push('Allocation sizing skipped: market price unavailable'); return null; }
     const leverage = config.leverage ?? signal.leverage;
     const stopPrice = signal.stop_loss ?? config.stopLoss;
-    const sized = sizeOrder({ allocation: config.allocation, marketType: account.marketType, price: input.price, equity: input.equity, maxEquity: input.maxEquity, ...(leverage === undefined ? {} : { leverage }), ...(stopPrice === undefined ? {} : { stopPrice }), ...(input.precision ? { precision: input.precision } : {}) });
+    const sized = sizeOrder({ allocation: config.allocation, marketType, price: input.price, equity: input.equity, maxEquity: input.maxEquity, ...(leverage === undefined ? {} : { leverage }), ...(stopPrice === undefined ? {} : { stopPrice }), ...(input.precision ? { precision: input.precision } : {}) });
     if (!sized.ok) { skipped.push(`Allocation sizing rejected: ${sized.reasons.join(', ')}`); return null; }
     return { quantity: sized.quantity as string, leverage: sized.leverage };
   };
@@ -106,7 +109,9 @@ export function buildWebhookOrders(input: WebhookBuildInput): WebhookBuildResult
       for (const [index, target] of takeProfits.entries()) push({ ...base, side: closingSide, positionSide, type: 'TAKE_PROFIT_MARKET', quantity: perTarget, stopPrice: target, reduceOnly: true, clientOrderId: `wh-tp${index}-${keyId}`, idempotencyKey: `${signal.nonce}:tp:${index}` });
     }
     const trailing = signal.trailing ?? config.trailing;
-    if (trailing && trailing.enabled !== false && input.price) {
+    if (trailing && trailing.enabled !== false && marketType === 'SPOT') {
+      skipped.push('Trailing stop skipped: not supported on spot orders');
+    } else if (trailing && trailing.enabled !== false && input.price) {
       const callback = Number(trailing.callbackPercent);
       const rawActivation = positionSide === 'LONG' ? Number(input.price) * (1 + callback / 100) : Number(input.price) * (1 - callback / 100);
       const activation = snap(String(rawActivation.toFixed(8)));

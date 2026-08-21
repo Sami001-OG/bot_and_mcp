@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WebhookBotConfigSchema, TradingViewSignalSchema, type PositionSide, type ResolvedOrderRequest, type TradingViewSignal, type WebhookBotConfig } from '@platform/contracts';
+import { WebhookBotConfigSchema, TradingViewSignalSchema, marketTypeForSymbol, type PositionSide, type ResolvedOrderRequest, type TradingViewSignal, type WebhookBotConfig } from '@platform/contracts';
 import { prisma, Prisma, type Bot } from '@platform/database';
 import { buildWebhookOrders } from '@platform/bot-engine';
 import { hashToken } from '@platform/security';
@@ -141,7 +141,8 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
       ...(signal.breakeven ? { breakeven: signal.breakeven } : {}),
       ...(signal.partialTps ? { partialTps: signal.partialTps } : {})
     };
-    session = await connectToAccount(bot.exchangeAccountId ?? undefined, undefined, accountConfig);
+    const runMarketType = signal.action === 'MANAGE' ? undefined : marketTypeForSymbol(signal.symbol);
+    session = await connectToAccount(bot.exchangeAccountId ?? undefined, runMarketType, accountConfig);
     if (signal.action === 'MANAGE') {
       const managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config });
       runMetrics.managed = managed as unknown as Prisma.InputJsonValue;
@@ -167,10 +168,10 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
     const orderResults: BotRunResult['orderResults'] = [];
     for (const order of result.orders) {
       if (!order.reduceOnly) {
-        const risk = evaluateOrder({ ...order, exchange: accountConfig.exchange, marketType: accountConfig.marketType, type: 'MARKET', quantity: order.quantity } as ResolvedOrderRequest, policy, { equity, dailyPnl: '0', weeklyPnl: '0', monthlyPnl: '0', peakEquity: maxEquity, exposure: '0', openPositions: 0, consecutiveLosses: 0, markPrice: price ?? '1', ...(price ? {} : { enforceMinimumNotional: false }) });
+        const risk = evaluateOrder({ ...order, exchange: accountConfig.exchange, marketType: order.marketType, type: 'MARKET', quantity: order.quantity } as ResolvedOrderRequest, policy, { equity, dailyPnl: '0', weeklyPnl: '0', monthlyPnl: '0', peakEquity: maxEquity, exposure: '0', openPositions: 0, consecutiveLosses: 0, markPrice: price ?? '1', ...(price ? {} : { enforceMinimumNotional: false }) });
         if (!risk.approved) { result.skipped.push(`Risk rejected entry: ${risk.code} ${risk.reasons.join(', ')}`); continue; }
       }
-      const row = await persistOrder({ ...order, idempotencyKey: `${order.idempotencyKey}:${bot.id}`, clientOrderId: order.clientOrderId }, { source: { kind: 'webhook', botId: bot.id, ...(context.deliveryId ? { deliveryId: context.deliveryId } : {}) }, ...(bot.exchangeAccountId ? { exchangeAccountId: bot.exchangeAccountId } : {}) }, accountConfig);
+      const row = await persistOrder({ ...order, idempotencyKey: `${order.idempotencyKey}:${bot.id}`, clientOrderId: order.clientOrderId }, { source: { kind: 'webhook', botId: bot.id, ...(context.deliveryId ? { deliveryId: context.deliveryId } : {}) }, ...(bot.exchangeAccountId ? { exchangeAccountId: bot.exchangeAccountId } : {}), marketType: order.marketType }, accountConfig);
       if (row.created) {
         created.push(row.order.id);
         const execution = await executeOrderNow(row.order.id, { config: accountConfig, adapter: session.adapter });

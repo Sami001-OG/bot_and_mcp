@@ -1,5 +1,5 @@
 import { prisma, type Bot } from '@platform/database';
-import { OrderRequestSchema, WebhookBotConfigSchema, type ExchangeId, type OrderRequest, type WebhookBotConfig } from '@platform/contracts';
+import { OrderRequestSchema, WebhookBotConfigSchema, marketTypeForSymbol, type ExchangeId, type OrderRequest, type WebhookBotConfig } from '@platform/contracts';
 import { type ExchangeAdapter } from '@platform/exchange-core';
 import { connectToAccount, getAccountConfig, type AccountConfig } from './account.js';
 import { CommandError } from './errors.js';
@@ -31,7 +31,8 @@ export async function getBotTradeContext(botId: string, requireActive = true): P
 }
 
 function assertBotSymbol(ctx: BotTradeContext, symbol: string): void {
-  const matches = ctx.config.symbols.some((entry) => entry === '*' || entry.toUpperCase() === symbol.toUpperCase());
+  const target = symbol.split(':')[0]?.toUpperCase() ?? symbol.toUpperCase();
+  const matches = ctx.config.symbols.some((entry) => entry === '*' || (entry.split(':')[0]?.toUpperCase() ?? entry.toUpperCase()) === target);
   if (!matches) {
     throw new CommandError(409, 'SYMBOL_NOT_IN_BOT', `Symbol ${symbol} is not in bot symbols (${ctx.config.symbols.join(', ')})`);
   }
@@ -61,7 +62,7 @@ export async function placeOrderThroughBot(botId: string, args: BotPlaceOrderArg
   const request: OrderRequest = {
     exchangeAccountId: ctx.account.id,
     exchange: ctx.account.exchange,
-    marketType: ctx.account.marketType,
+    marketType: marketTypeForSymbol(symbol),
     symbol,
     side: args.side,
     positionSide: (args.positionSide ?? 'BOTH') as OrderRequest['positionSide'],

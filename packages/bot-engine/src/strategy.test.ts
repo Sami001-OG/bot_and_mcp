@@ -134,7 +134,7 @@ describe('buildWebhookOrders', () => {
   });
 
   it('attaches a trailing stop bracket from the signal override', () => {
-    const result = buildWebhookOrders({ signal: signal({ trailing: { callbackPercent: 1.5 } }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    const result = buildWebhookOrders({ signal: signal({ trailing: { callbackPercent: 1.5 }, symbol: 'BTC/USDT:USDT' }), config: config({ symbols: ['BTC/USDT:USDT'] }), account, price: '95000', equity: '1000', maxEquity: '1000' });
     expect(result.skipped).toEqual([]);
     const trailing = result.orders.find((order) => order.type === 'TRAILING_STOP');
     if (!trailing) throw new Error('expected trailing stop order');
@@ -142,14 +142,14 @@ describe('buildWebhookOrders', () => {
   });
 
   it('activates the trailing stop in the favorable direction for a short', () => {
-    const result = buildWebhookOrders({ signal: signal({ action: 'SHORT', trailing: { callbackPercent: 2 } }), config: config(), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    const result = buildWebhookOrders({ signal: signal({ action: 'SHORT', trailing: { callbackPercent: 2 }, symbol: 'BTC/USDT:USDT' }), config: config({ symbols: ['BTC/USDT:USDT'] }), account, price: '95000', equity: '1000', maxEquity: '1000' });
     const trailing = result.orders.find((order) => order.type === 'TRAILING_STOP');
     if (!trailing) throw new Error('expected trailing stop order');
     expect(trailing).toMatchObject({ side: 'BUY', positionSide: 'SHORT', stopPrice: '93100.00000000', callbackRate: '2', reduceOnly: true });
   });
 
   it('attaches a trailing stop from the saved bot config', () => {
-    const result = buildWebhookOrders({ signal: signal(), config: config({ trailing: { enabled: true, callbackPercent: 2 } }), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    const result = buildWebhookOrders({ signal: signal({ symbol: 'BTC/USDT:USDT' }), config: config({ symbols: ['BTC/USDT:USDT'], trailing: { enabled: true, callbackPercent: 2 } }), account, price: '95000', equity: '1000', maxEquity: '1000' });
     const trailing = result.orders.find((order) => order.type === 'TRAILING_STOP');
     if (!trailing) throw new Error('expected trailing stop order');
     expect(trailing).toMatchObject({ callbackRate: '2' });
@@ -157,7 +157,7 @@ describe('buildWebhookOrders', () => {
   });
 
   it('keeps a fixed stop loss alongside the trailing stop', () => {
-    const result = buildWebhookOrders({ signal: signal({ trailing: { callbackPercent: 1.5 } }), config: config({ stopLoss: '90000' }), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    const result = buildWebhookOrders({ signal: signal({ trailing: { callbackPercent: 1.5 }, symbol: 'BTC/USDT:USDT' }), config: config({ symbols: ['BTC/USDT:USDT'], stopLoss: '90000' }), account, price: '95000', equity: '1000', maxEquity: '1000' });
     const types = result.orders.map((order) => order.type);
     expect(types).toContain('STOP_MARKET');
     expect(types).toContain('TRAILING_STOP');

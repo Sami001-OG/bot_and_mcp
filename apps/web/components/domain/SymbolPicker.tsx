@@ -4,12 +4,11 @@ import { useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { Market } from '../../lib/types';
 
-export function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, onChange, marketType }: { markets: Market[] | null; marketsError: string | null; onRetryMarkets: () => void; selected: string[]; onChange: (next: string[]) => void; marketType?: string }) {
+export function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, onChange }: { markets: Market[] | null; marketsError: string | null; onRetryMarkets: () => void; selected: string[]; onChange: (next: string[]) => void }) {
   const [query, setQuery] = useState('');
   const [custom, setCustom] = useState('');
 
-  const typeFilter = marketType?.toUpperCase() === 'SPOT' ? 'spot' : 'swap';
-  const scoped = (markets ?? []).filter((market) => market.type === typeFilter);
+  const scoped = (markets ?? []).filter((market) => market.type === 'spot' || market.type === 'swap');
 
   const toggle = (symbol: string) => onChange(selected.includes(symbol) ? selected.filter((item) => item !== symbol) : [...selected, symbol]);
   const queryUpper = query.trim().toUpperCase();
@@ -54,7 +53,7 @@ export function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, 
         {matching.slice(0, 200).map((market) => (
           <label className="symbol-row" key={market.symbol}>
             <input checked={selected.includes(market.symbol)} onChange={() => toggle(market.symbol)} type="checkbox" />
-            <span><b>{market.symbol}</b><em>{market.base} · {market.quote}</em></span>
+            <span><b>{market.symbol}</b><em>{market.base} · {market.quote} · {market.type === 'spot' ? 'Spot' : 'Futures'}</em></span>
           </label>
         ))}
         {matching.length > 200 && <p className="muted small">Showing first 200 matches — refine your search.</p>}

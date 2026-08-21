@@ -134,10 +134,6 @@ export function BotFormModal({
     }
   };
 
-  const marketType = editTarget
-    ? (selected?.exchangeAccount?.marketType ?? undefined)
-    : (accounts.find((account) => account.id === selectedAccountId)?.marketType ?? undefined);
-
   return (
     <Modal open={open} wide eyebrow={editTarget ? 'EDIT CONFIG' : 'AUTOMATION'} title={editTarget ? `Edit ${editTarget.name}` : 'New webhook bot'} onClose={onClose}>
       <form key={`${editTarget?.id ?? 'new'}:${open}`} onSubmit={persistBot}>
@@ -170,7 +166,6 @@ export function BotFormModal({
           onRetryMarkets={onRetryMarkets}
           onChange={onSymbolsChange}
           selected={symbols}
-          {...(marketType ? { marketType } : {})}
         />
         <div className="form-row">
           <label>Allocation mode<select defaultValue={prefill?.allocation?.mode ?? 'NONE'} name="allocationMode">{ALLOCATION_OPTIONS.map((mode) => <option key={mode} value={mode}>{mode === 'NONE' ? 'Use signal size' : mode}</option>)}</select></label>

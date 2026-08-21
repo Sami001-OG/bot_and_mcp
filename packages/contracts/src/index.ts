@@ -6,6 +6,10 @@ export const ExchangeId = z.enum(['binance', 'bybit', 'okx', 'kucoin', 'kraken',
 export type ExchangeId = z.infer<typeof ExchangeId>;
 export const MarketType = z.enum(['SPOT', 'MARGIN', 'USDT_FUTURES', 'COIN_FUTURES', 'PERPETUAL']);
 export type MarketType = z.infer<typeof MarketType>;
+
+export function marketTypeForSymbol(symbol: string): MarketType {
+  return symbol.includes(':') ? 'USDT_FUTURES' : 'SPOT';
+}
 export const OrderSide = z.enum(['BUY', 'SELL']);
 export type OrderSide = z.infer<typeof OrderSide>;
 export const PositionSide = z.enum(['LONG', 'SHORT', 'BOTH']);

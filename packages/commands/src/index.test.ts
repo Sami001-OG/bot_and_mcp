@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BreakevenConfigSchema, DcaConfigSchema, PartialTpsConfigSchema, TradingViewSignalSchema, WebhookBotConfigSchema } from '@platform/contracts';
+import { BreakevenConfigSchema, DcaConfigSchema, PartialTpsConfigSchema, TradingViewSignalSchema, WebhookBotConfigSchema, marketTypeForSymbol, type MarketType } from '@platform/contracts';
 import { CommandError, breakevenTarget, buildRiskContext, dcaStepDue, managePrefix, mergeManagementOverrides, parseOrderBody, type AccountConfig } from './index.js';
 
 const testConfig: AccountConfig = { id: 'acc-1', exchange: 'bybit', marketType: 'SPOT', label: 'test', apiKey: 'k', secret: 's' };
@@ -172,5 +172,14 @@ describe('commands', () => {
     expect(() => TradingViewSignalSchema.parse({ ...base, action: 'BUY' })).toThrow();
     expect(() => TradingViewSignalSchema.parse({ ...base, action: 'BUY', size: '0.01' })).not.toThrow();
     expect(() => TradingViewSignalSchema.parse({ ...base, action: 'MANAGE', size: '0.01' })).toThrow();
+  });
+
+  it('derives marketType from symbol format via marketTypeForSymbol', () => {
+    expect(marketTypeForSymbol('BTC/USDT:USDT')).toBe('USDT_FUTURES');
+    expect(marketTypeForSymbol('BTC/USDT')).toBe('SPOT');
+    expect(marketTypeForSymbol('ETH/USDT:USDT')).toBe('USDT_FUTURES');
+    expect(marketTypeForSymbol('SOL/USDT')).toBe('SPOT');
+    expect(marketTypeForSymbol('DOGE/USDT:USDT')).toBe('USDT_FUTURES');
+    expect(marketTypeForSymbol('DOGE/USDT')).toBe('SPOT');
   });
 });
