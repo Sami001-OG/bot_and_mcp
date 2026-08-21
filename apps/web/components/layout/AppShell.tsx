@@ -17,6 +17,11 @@ export const NAV_ITEMS = [
   { key: 'risk', href: '/risk', label: 'Risk & safety', short: 'Risk', icon: ShieldCheck },
 ] as const;
 
+const NAV_GROUPS = [
+  { label: 'Trading', keys: ['dashboard', 'orders', 'bots'] },
+  { label: 'System', keys: ['accounts', 'risk'] },
+] as const;
+
 export type AppSection = (typeof NAV_ITEMS)[number]['key'];
 
 export default function AppShell({ active, children }: { active: AppSection; children: React.ReactNode }) {
@@ -165,15 +170,20 @@ function Sidebar({ active, email, onSignOut }: { active: AppSection; email: stri
         </span>
       </Link>
       <nav aria-label="Main navigation">
-        {NAV_ITEMS.map((item) => {
-          const Icon = item.icon;
-          return (
-            <Link aria-current={active === item.key ? 'page' : undefined} className={cn('nav-link', active === item.key && 'active')} href={item.href} key={item.key}>
-              <Icon size={15} />
-              {item.label}
-            </Link>
-          );
-        })}
+        {NAV_GROUPS.map((group) => (
+          <div className="nav-group" key={group.label}>
+            <p className="nav-section">{group.label}</p>
+            {NAV_ITEMS.filter((item) => (group.keys as readonly string[]).includes(item.key)).map((item) => {
+              const Icon = item.icon;
+              return (
+                <Link aria-current={active === item.key ? 'page' : undefined} className={cn('nav-link', active === item.key && 'active')} href={item.href} key={item.key}>
+                  <Icon size={15} />
+                  {item.label}
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
       <div className="security user-card">
         <div className="avatar">OWN</div>
