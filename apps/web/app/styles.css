@@ -1114,40 +1114,7 @@ button.sm { padding: 6px 10px; font-size: 11.5px; min-height: 30px; }
 .mobile-cards { display: none; }
 
 @media (max-width: 768px) {
-  .table-scroll table,
-  .table-scroll thead,
-  .table-scroll tbody,
-  .table-scroll tr,
-  .table-scroll th,
-  .table-scroll td {
-    display: block;
-  }
-  .table-scroll thead { display: none; }
-  .table-scroll { margin: 0; padding: 0; }
-  .table-scroll table { min-width: 0; border: 0; }
-  .table-scroll tr { border-bottom: 1px solid var(--line-0); padding: 12px 0; }
-  .table-scroll td {
-    white-space: normal;
-    padding: 2px 0;
-    font-size: 12px;
-    border: 0;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-    min-height: 26px;
-  }
-  .table-scroll td::before {
-    content: attr(data-label);
-    font-weight: 600;
-    color: var(--text-3);
-    font-size: 10.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    min-width: 72px;
-    flex-shrink: 0;
-  }
-  .table-scroll td:last-child { border-bottom: 0; }
+  .table-scroll:has(~ .mobile-cards) { display: none; }
 
   .mobile-cards { display: flex; flex-direction: column; gap: 10px; }
   .mobile-cards .mc {

@@ -124,7 +124,7 @@ export function BotListTable({
               {bot.webhook && (
                 <div className="mc-row"><span className="mc-label">Webhook</span><span className="mc-value"><code>/{bot.webhook.id.slice(0, 8)}</code></span></div>
               )}
-              <div className="mc-actions" onMouseDown={(event) => event.stopPropagation()}>
+              <div className="mc-actions" onClick={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
                 {bot.status !== 'ACTIVE' && <button className="safe" onClick={() => onResume(bot)} type="button">Resume</button>}
                 {bot.status === 'ACTIVE' && <button onClick={() => onPause(bot)} type="button">Pause</button>}
                 <button onClick={() => onEdit(bot)} type="button">Edit</button>
