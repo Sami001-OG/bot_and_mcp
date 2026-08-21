@@ -449,6 +449,7 @@ export function isOrderCancelable(state: string): boolean {
 }
 
 export async function cancelOrderCommand(orderId: string): Promise<{ accepted: true; orderId: string; state: string }> {
+  if (!/^[0-9a-f]{24}$/i.test(orderId)) throw new CommandError(400, 'INVALID_ORDER_ID', 'orderId must be a platform order id (24-hex). Live exchange-order ids can only be canceled through a bot MCP server.');
   const order = await prisma.orderIntent.findUnique({ where: { id: orderId } });
   if (!order) throw new CommandError(404, 'ORDER_NOT_FOUND', 'Order not found');
   if (!isOrderCancelable(order.state)) {

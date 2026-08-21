@@ -87,12 +87,24 @@ export async function placeOrderThroughBot(botId: string, args: BotPlaceOrderArg
 
 export async function cancelOrderThroughBot(botId: string, orderId: string): Promise<{ accepted: true; orderId: string; state: string }> {
   const ctx = await getBotTradeContext(botId);
-  const order = await prisma.orderIntent.findUnique({ where: { id: orderId } });
-  if (!order) throw new CommandError(404, 'ORDER_NOT_FOUND', 'Order not found');
-  if (order.exchangeAccountId && order.exchangeAccountId !== ctx.account.id) {
-    throw new CommandError(403, 'ORDER_NOT_IN_BOT', 'Order does not belong to this bot');
+  const order = await prisma.orderIntent.findUnique({ where: { id: orderId } }).catch(() => null);
+  if (order) {
+    if (order.exchangeAccountId && order.exchangeAccountId !== ctx.account.id) {
+      throw new CommandError(403, 'ORDER_NOT_IN_BOT', 'Order does not belong to this bot');
+    }
+    return cancelOrderCommand(orderId);
   }
-  return cancelOrderCommand(orderId);
+  const session = await connectToAccount(ctx.account.id, ctx.config.marketType ?? undefined);
+  try {
+    const live = (await session.adapter.getOrders().catch(() => [])).find((entry) => entry.id === orderId);
+    await session.adapter.cancelOrder(orderId, live?.symbol ?? '');
+    return { accepted: true, orderId, state: 'CANCELED' };
+  } catch (error) {
+    if (error instanceof CommandError) throw error;
+    throw new CommandError(404, 'ORDER_NOT_FOUND', `No platform or open exchange order with id ${orderId}`);
+  } finally {
+    await session.adapter.disconnect().catch(() => undefined);
+  }
 }
 
 export async function closePositionThroughBot(botId: string, symbol: string): Promise<Record<string, unknown>> {

@@ -396,11 +396,14 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
   }
   async getFundingRate(symbol: string): Promise<FundingRate | null> {
     const client = this.requireClient();
-    if (!client.has.fetchFundingRate) return null;
+    const [base, quotePart] = symbol.split('/');
+    const exchangeSymbol = `${base?.toUpperCase()}${(quotePart ?? 'USDT').split(':')[0]?.toUpperCase()}`;
     try {
-      const rate = await client.fetchFundingRate(this.marketSymbol(symbol));
-      if (rate.fundingRate == null) return null;
-      return { symbol: this.bareSymbol(String(rate.symbol ?? symbol)), fundingRate: String(rate.fundingRate), ...(typeof rate.nextFundingTimestamp === 'number' ? { nextFundingTime: new Date(rate.nextFundingTimestamp).toISOString() } : {}) };
+      const v5 = client as unknown as { publicGetV5MarketTickers: (request: Record<string, unknown>) => Promise<{ result?: { list?: Array<Record<string, unknown>> } }> };
+      const response = await v5.publicGetV5MarketTickers({ category: 'linear', symbol: exchangeSymbol });
+      const row = response.result?.list?.[0];
+      if (!row || row.fundingRate == null) return null;
+      return { symbol: this.bareSymbol(symbol), fundingRate: String(row.fundingRate), ...(row.nextFundingTime ? { nextFundingTime: new Date(Number(row.nextFundingTime)).toISOString() } : {}) };
     } catch (error) { throw this.normalize(error); }
   }
   async getOpenInterest(symbol: string): Promise<OpenInterest | null> {
