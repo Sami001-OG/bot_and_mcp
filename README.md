@@ -222,6 +222,25 @@ Every example below is a complete, valid signal body. Replace `timestamp` and `n
 }
 ```
 
+**1b. Limit entry (resting order) with the same bracket logic**
+
+`type: "LIMIT"` + `price` places a resting limit order instead of a market fill. SL/TP brackets, allocation sizing and trailing activation are all computed against the limit price:
+
+```json
+{
+  "exchange": "bybit",
+  "symbol": "BTC/USDT:USDT",
+  "action": "LONG",
+  "type": "LIMIT",
+  "price": "92000",
+  "size": "0.01",
+  "stop_loss": "89000",
+  "take_profit": ["100000"],
+  "timestamp": "2026-08-19T10:00:00.000Z",
+  "nonce": "b1f2a3c4d5e7"
+}
+```
+
 **2. Entry that also (ephemerally) enables DCA with custom params for this run**
 
 The saved bot config is untouched; this run DCA will trigger after a 4% drop and step every further 4%, $50 fixed per step, max 3 steps:
@@ -549,6 +568,8 @@ The body is a single JSON object. Unknown fields are ignored; listed constraints
 | `symbol` | string | yes | 3–40 chars, case-insensitive (uppercased server-side). Bare (`BTC/USDT`) or futures (`BTC/USDT:USDT`) form accepted; routed per the bot's market type — see [Symbol routing](#symbol-routing-and-market-types). |
 | `action` | string | yes | One of `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`, `MANAGE` (also schema-valid but bot-ignored unless allowlisted: `SET_LEVERAGE`, `MOVE_STOP`). |
 | `size` | **string** | yes* | **Decimal string**, e.g. `"0.01"`. A JSON number (`0.01`) is **rejected**. Base-asset quantity. Required for every action **except** `MANAGE`; forbidden **with** `MANAGE`. Ignored when the bot has an allocation mode. |
+| `type` | string | no | `MARKET` (default) or `LIMIT` — entry execution style. Only meaningful for entry actions (`BUY`/`SELL`/`LONG`/`SHORT`; also applies to the new position opened by `REVERSE`). CLOSE/PARTIAL_EXIT are always market. |
+| `price` | string | yes* | Decimal-string limit price. **Required when `type` is `LIMIT`**, forbidden otherwise. The limit price is also used to validate SL/TP brackets, size allocation-based entries, and anchor trailing-stop activation. |
 | `timestamp` | **string** | yes | **ISO-8601 UTC string ending in `Z`**, e.g. `"2026-08-21T12:00:00.000Z"`. Must be within **±5 minutes** of server time. Not epoch seconds. |
 | `nonce` | string | yes | 12–128 chars. Must be **unique per endpoint within 5 minutes** (replay window). Reusing one → `401 WEBHOOK_VERIFICATION_FAILED`. |
 | `leverage` | number | no | Integer 1–200. Futures entries only; the bot's saved leverage wins if it sets one. |
@@ -561,7 +582,7 @@ The body is a single JSON object. Unknown fields are ignored; listed constraints
 | `breakeven` | object | no | Ephemeral breakeven override — see below. |
 | `partialTps` | object | no | Ephemeral partial-TP override — see below. |
 
-\* `size` super-rule: present on trade actions, absent on `MANAGE`.
+\* `size` super-rule: present on trade actions, absent on `MANAGE`. `price` super-rule: required with `type: "LIMIT"`, rejected without it.
 
 #### Ephemeral overrides (per-run config)
 
@@ -626,7 +647,7 @@ Every webhook capability works on **both** bot market types unless marked otherw
 
 | Webhook feature | Futures bot | Spot bot | How it works |
 |---|---|---|---|
-| Entry `BUY`/`LONG`/`SELL`/`SHORT` | ✓ | ✓ | Market order; futures apply leverage/position-mode handling, spot trades 1:1 against balance. |
+| Entry `BUY`/`LONG`/`SELL`/`SHORT` | ✓ | ✓ | **Market or limit** (`type` + `price`); futures apply leverage/position-mode handling, spot trades 1:1 against balance. |
 | Capital-per-trade allocation (fixed $ / % equity / % peak equity / risk %) | ✓ | ✓ | Bot-side sizing; on spot the sizing is leverage-free. Overrides signal `size` when configured. |
 | Leverage (`leverage` field or bot config) | ✓ | n/a — ignored | Spot has no leverage; the field is schema-valid but inert on spot bots. |
 | Fixed stop-loss bracket (`stop_loss` or bot config) | ✓ | ✓ | Reduce-only-style conditional stop-market; Bybit spot conditionals are mapped automatically (no `triggerDirection`). |

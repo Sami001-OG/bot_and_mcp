@@ -25,6 +25,22 @@ describe('buildWebhookOrders', () => {
     expect(tp2).toMatchObject({ side: 'SELL', type: 'TAKE_PROFIT_MARKET', stopPrice: '110000', reduceOnly: true, quantity: '0.00500000', idempotencyKey: 'n-123456789012:tp:1' });
   });
 
+  it('builds a LIMIT entry with brackets validated against the limit price', () => {
+    const result = buildWebhookOrders({ signal: signal({ type: 'LIMIT', price: '92000' }), config: config({ stopLoss: '90000', takeProfits: ['100000'] }), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    expect(result.skipped).toEqual([]);
+    expect(result.orders).toHaveLength(3);
+    const [entry, sl, tp] = result.orders;
+    if (!entry || !sl || !tp) throw new Error('expected 3 orders');
+    expect(entry).toMatchObject({ type: 'LIMIT', price: '92000', timeInForce: 'GTC', side: 'BUY', positionSide: 'LONG', reduceOnly: false });
+    expect(sl).toMatchObject({ type: 'STOP_MARKET', stopPrice: '90000', reduceOnly: true });
+  });
+
+  it('skips a LIMIT entry whose stop loss sits above the limit price for a LONG', () => {
+    const result = buildWebhookOrders({ signal: signal({ type: 'LIMIT', price: '92000' }), config: config({ stopLoss: '93000' }), account, price: '95000', equity: '1000', maxEquity: '1000' });
+    expect(result.orders).toHaveLength(0);
+    expect(result.skipped[0]).toContain('not below entry');
+  });
+
   it('config stopLoss and takeProfits override signal values', () => {
     const result = buildWebhookOrders({ signal: signal({ stop_loss: '88000', take_profit: ['99000'] }), config: config({ stopLoss: '87000', takeProfits: ['98000'] }), account, price: '95000', equity: '1000', maxEquity: '1000' });
     expect(result.orders.map((order) => order.stopPrice)).toContain('87000');

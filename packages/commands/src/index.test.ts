@@ -197,6 +197,16 @@ describe('commands', () => {
     expect(() => TradingViewSignalSchema.parse({ ...base, action: 'MANAGE', size: '0.01' })).toThrow();
   });
 
+  it('requires price for LIMIT signals and rejects price without LIMIT', () => {
+    const base = { exchange: 'bybit', symbol: 'BTC/USDT:USDT', action: 'BUY', size: '0.01', nonce: 'abcdefghijkl', timestamp: '2026-08-19T00:00:00.000Z' };
+    expect(() => TradingViewSignalSchema.parse({ ...base, type: 'LIMIT' })).toThrow();
+    const ok = TradingViewSignalSchema.parse({ ...base, type: 'LIMIT', price: '90000' });
+    expect(ok.type).toBe('LIMIT');
+    expect(ok.price).toBe('90000');
+    expect(() => TradingViewSignalSchema.parse({ ...base, price: '90000' })).toThrow();
+    expect(TradingViewSignalSchema.parse(base).type).toBeUndefined();
+  });
+
   it('derives marketType from symbol format via marketTypeForSymbol', () => {
     expect(marketTypeForSymbol('BTC/USDT:USDT')).toBe('USDT_FUTURES');
     expect(marketTypeForSymbol('BTC/USDT')).toBe('SPOT');

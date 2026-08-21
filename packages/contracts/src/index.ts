@@ -135,6 +135,8 @@ export const TradingViewSignalSchema = z.object({
   exchange: ExchangeId,
   symbol: z.string().min(3).max(40).transform((value) => value.toUpperCase()),
   action: z.enum(['BUY', 'SELL', 'LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT', 'REVERSE', 'SET_LEVERAGE', 'MOVE_STOP', 'PARTIAL_EXIT', 'MANAGE']),
+  type: z.enum(['MARKET', 'LIMIT']).optional(),
+  price: PositiveDecimalString.optional(),
   size: PositiveDecimalString.optional(),
   leverage: z.number().int().min(1).max(200).optional(),
   stop_loss: PositiveDecimalString.optional(),
@@ -153,6 +155,12 @@ export const TradingViewSignalSchema = z.object({
   }
   if (value.action === 'MANAGE' && value.size) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['size'], message: 'Size is not used with action MANAGE' });
+  }
+  if (value.type === 'LIMIT' && !value.price) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['price'], message: 'Price is required when type is LIMIT' });
+  }
+  if (value.type !== 'LIMIT' && value.price) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['price'], message: 'Price is only used when type is LIMIT' });
   }
 });
 export type TradingViewSignal = z.infer<typeof TradingViewSignalSchema>;

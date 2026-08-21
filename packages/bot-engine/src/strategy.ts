@@ -9,13 +9,14 @@ export type SizedOrderRequest = {
   symbol: string;
   side: 'BUY' | 'SELL';
   positionSide: 'LONG' | 'SHORT' | 'BOTH';
-  type: 'MARKET' | 'STOP_MARKET' | 'TAKE_PROFIT_MARKET' | 'TRAILING_STOP';
+  type: 'MARKET' | 'LIMIT' | 'STOP_MARKET' | 'TAKE_PROFIT_MARKET' | 'TRAILING_STOP';
   quantity: string;
   price?: string;
   stopPrice?: string;
   callbackRate?: string;
   reduceOnly: boolean;
   postOnly: boolean;
+  timeInForce?: 'GTC';
   clientOrderId: string;
   idempotencyKey: string;
   leverage?: number;
@@ -75,14 +76,17 @@ export function buildWebhookOrders(input: WebhookBuildInput): WebhookBuildResult
 
   const keyId = `${input.botId ? `${input.botId.slice(0, 8)}-` : ''}${signal.nonce.slice(-8)}`;
   const marketType = marketTypeForSymbol(signal.symbol);
-  const base = { exchangeAccountId: account.id, exchange: account.exchange, marketType, symbol: signal.symbol, postOnly: false };
+  const entryType = signal.type === 'LIMIT' ? 'LIMIT' : 'MARKET';
+  const entryLimitPrice = entryType === 'LIMIT' ? signal.price : undefined;
+  const refPrice = entryLimitPrice ?? input.price;
+  const base = { exchangeAccountId: account.id, exchange: account.exchange, marketType, symbol: signal.symbol, postOnly: false as const, timeInForce: 'GTC' as const };
 
   const sizeEntry = (): { quantity: string; leverage?: number } | null => {
     if (!config.allocation) return signal.size ? { quantity: signal.size } : null;
-    if (!input.price) { skipped.push('Allocation sizing skipped: market price unavailable'); return null; }
+    if (!refPrice) { skipped.push('Allocation sizing skipped: market price unavailable'); return null; }
     const leverage = config.leverage ?? signal.leverage;
     const stopPrice = signal.stop_loss ?? config.stopLoss;
-    const sized = sizeOrder({ allocation: config.allocation, marketType, price: input.price, equity: input.equity, maxEquity: input.maxEquity, ...(leverage === undefined ? {} : { leverage }), ...(stopPrice === undefined ? {} : { stopPrice }), ...(input.precision ? { precision: input.precision } : {}) });
+    const sized = sizeOrder({ allocation: config.allocation, marketType, price: refPrice, equity: input.equity, maxEquity: input.maxEquity, ...(leverage === undefined ? {} : { leverage }), ...(stopPrice === undefined ? {} : { stopPrice }), ...(input.precision ? { precision: input.precision } : {}) });
     if (!sized.ok) { skipped.push(`Allocation sizing rejected: ${sized.reasons.join(', ')}`); return null; }
     return { quantity: sized.quantity as string, leverage: sized.leverage };
   };
@@ -93,14 +97,14 @@ export function buildWebhookOrders(input: WebhookBuildInput): WebhookBuildResult
     const takeProfits = (config.takeProfits ?? signal.take_profit ?? []).map(snap).filter((target): target is string => target !== undefined);
     if (stopLoss !== (config.stopLoss ?? signal.stop_loss) || takeProfits.some((target, index) => target !== (config.takeProfits ?? signal.take_profit ?? [])[index])) notes.push('Bracket prices aligned to exchange tick size');
     if (config.requireSignalStopLoss && !stopLoss) { skipped.push('Stop loss required by bot config'); return; }
-    if (input.price) {
-      const invalid = isBadBracket(positionSide, Number(input.price), stopLoss, takeProfits);
+    if (refPrice) {
+      const invalid = isBadBracket(positionSide, Number(refPrice), stopLoss, takeProfits);
       if (invalid) { skipped.push(invalid); return; }
     }
     const sized = sizeEntry();
     if (!sized) return;
     const entryQuantity = sized.quantity;
-    const entry: SizedOrderRequest = { ...base, side, positionSide, type: 'MARKET', quantity: entryQuantity, reduceOnly: false, clientOrderId: `wh-${keyId}`, idempotencyKey: `${signal.nonce}:entry`, ...(sized.leverage ? { leverage: sized.leverage } : {}) };
+    const entry: SizedOrderRequest = { ...base, side, positionSide, type: entryType, quantity: entryQuantity, reduceOnly: false, clientOrderId: `wh-${keyId}`, idempotencyKey: `${signal.nonce}:entry`, ...(entryLimitPrice ? { price: entryLimitPrice } : {}), ...(sized.leverage ? { leverage: sized.leverage } : {}) };
     push(entry);
     const closingSide: 'BUY' | 'SELL' = side === 'BUY' ? 'SELL' : 'BUY';
     if (stopLoss) push({ ...base, side: closingSide, positionSide, type: 'STOP_MARKET', quantity: entryQuantity, stopPrice: stopLoss, reduceOnly: true, clientOrderId: `wh-sl-${keyId}`, idempotencyKey: `${signal.nonce}:sl` });
@@ -111,13 +115,13 @@ export function buildWebhookOrders(input: WebhookBuildInput): WebhookBuildResult
     const trailing = signal.trailing ?? config.trailing;
     if (trailing && trailing.enabled !== false && marketType === 'SPOT') {
       skipped.push('Trailing stop skipped: not supported on spot orders');
-    } else if (trailing && trailing.enabled !== false && input.price) {
+    } else if (trailing && trailing.enabled !== false && refPrice) {
       const callback = Number(trailing.callbackPercent);
-      const rawActivation = positionSide === 'LONG' ? Number(input.price) * (1 + callback / 100) : Number(input.price) * (1 - callback / 100);
+      const rawActivation = positionSide === 'LONG' ? Number(refPrice) * (1 + callback / 100) : Number(refPrice) * (1 - callback / 100);
       const activation = snap(String(rawActivation.toFixed(8)));
       push({ ...base, side: closingSide, positionSide, type: 'TRAILING_STOP', quantity: entryQuantity, ...(activation === undefined ? {} : { stopPrice: activation }), callbackRate: String(trailing.callbackPercent), reduceOnly: true, clientOrderId: `wh-tr-${keyId}`, idempotencyKey: `${signal.nonce}:tr` });
       notes.push(`Trailing stop placed: activates after ${trailing.callbackPercent}% move in favor, then follows with ${trailing.callbackPercent}% callback`);
-    } else if (trailing && trailing.enabled !== false && !input.price) {
+    } else if (trailing && trailing.enabled !== false && !refPrice) {
       skipped.push('Trailing stop skipped: market price unavailable for activation price');
     }
   };

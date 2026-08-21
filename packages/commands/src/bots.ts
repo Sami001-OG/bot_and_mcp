@@ -191,7 +191,8 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
       const free = Number(holding?.free ?? 0);
       if (Number.isFinite(free) && free > 0) { currentPositionSide = 'LONG'; positionQuantity = free; }
     }
-    const result = buildWebhookOrders({ signal: effectiveSignal, config, account: { id: accountConfig.id, exchange: accountConfig.exchange, marketType: botMarketType }, botId: bot.id, ...(price === undefined ? {} : { price }), ...(positionQuantity === undefined ? {} : { positionQuantity }), equity, maxEquity, ...(currentPositionSide === undefined ? {} : { currentPositionSide }), ...(precision ? { precision } : {}) });
+    const entryRef = effectiveSignal.type === 'LIMIT' && effectiveSignal.price ? effectiveSignal.price : price;
+    const result = buildWebhookOrders({ signal: effectiveSignal, config, account: { id: accountConfig.id, exchange: accountConfig.exchange, marketType: botMarketType }, botId: bot.id, ...(entryRef === undefined ? {} : { price: entryRef }), ...(positionQuantity === undefined ? {} : { positionQuantity }), equity, maxEquity, ...(currentPositionSide === undefined ? {} : { currentPositionSide }), ...(precision ? { precision } : {}) });
     const created: string[] = [];
     const orderResults: BotRunResult['orderResults'] = [];
     for (const order of result.orders) {
