@@ -3,7 +3,7 @@
 import { Activity, Bot, BookOpen, KeyRound, LayoutDashboard, LogOut, ShieldCheck, X } from 'lucide-react';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { NexusLogo } from '../../app/logo';
+import { BotxLogo } from '../../app/logo';
 import { checkSession, login, signOut as apiSignOut, type AuthSession } from '../../lib/session';
 import { cn } from '../../lib/cn';
 import { AppContext, type Toast } from './AppContext';
@@ -96,9 +96,9 @@ export default function AppShell({ active, children }: { active: AppSection; chi
       <main className="login-shell">
         <section className="login-card">
           <div className="login-brand">
-            <NexusLogo className="brand-logo" />
+            <BotxLogo className="brand-logo" />
             <div>
-              <b>NexusTrade</b>
+              <b>BOTX</b>
               <small>Bybit execution terminal</small>
             </div>
           </div>
@@ -163,9 +163,9 @@ function Sidebar({ active, email, onSignOut }: { active: AppSection; email: stri
   return (
     <aside>
       <Link className="brand brand-button" href="/">
-        <NexusLogo className="brand-logo" />
+        <BotxLogo className="brand-logo" />
         <span>
-          <b>NexusTrade</b>
+          <b>BOTX</b>
           <small>Execution terminal</small>
         </span>
       </Link>

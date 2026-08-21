@@ -2,8 +2,8 @@ import type { MetadataRoute } from 'next';
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: 'NexusTrade Trading Command Center',
-    short_name: 'NexusTrade',
+    name: 'BOTX Trading Command Center',
+    short_name: 'BOTX',
     description: 'Secure Bybit execution, TradingView automation, portfolio monitoring, and live risk controls.',
     start_url: '/',
     display: 'standalone',

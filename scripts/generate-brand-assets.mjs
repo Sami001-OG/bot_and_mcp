@@ -7,10 +7,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'apps', 'web', 'public');
 
 const mark = `
-  <path d="M144 344V168l112 176 112-176v176" fill="none" stroke="url(#mark)" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="144" cy="168" r="31" fill="#A991FF"/>
-  <circle cx="256" cy="344" r="31" fill="#7357FF"/>
-  <circle cx="368" cy="168" r="31" fill="#32D8A0"/>
+  <path d="M162 392V120h96a64 64 0 0 1 0 128H162m0 0h116a72 72 0 0 1 0 144H162" fill="none" stroke="url(#mark)" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
 `;
 
 function iconSvg({ maskable = false } = {}) {
@@ -20,7 +17,7 @@ function iconSvg({ maskable = false } = {}) {
   return Buffer.from(`
     <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
       <defs>
-        <linearGradient id="mark" x1="170" y1="160" x2="458" y2="350" gradientUnits="userSpaceOnUse">
+        <linearGradient id="mark" x1="140" y1="90" x2="400" y2="430" gradientUnits="userSpaceOnUse">
           <stop stop-color="#A991FF"/>
           <stop offset=".5" stop-color="#7357FF"/>
           <stop offset="1" stop-color="#32D8A0"/>
@@ -41,7 +38,7 @@ function socialSvg() {
   return Buffer.from(`
     <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
       <defs>
-        <linearGradient id="mark" x1="170" y1="160" x2="458" y2="350" gradientUnits="userSpaceOnUse">
+        <linearGradient id="mark" x1="140" y1="90" x2="400" y2="430" gradientUnits="userSpaceOnUse">
           <stop stop-color="#A991FF"/>
           <stop offset=".5" stop-color="#7357FF"/>
           <stop offset="1" stop-color="#32D8A0"/>
@@ -62,7 +59,7 @@ function socialSvg() {
       <path d="M0 104H1200M0 526H1200M86 0V630M1114 0V630" stroke="#FFFFFF" stroke-opacity=".055"/>
       <path d="M0 315H1200" stroke="#FFFFFF" stroke-opacity=".025"/>
       <g transform="translate(20 28) scale(.34)">${mark}</g>
-      <text x="188" y="135" fill="#F4F5F7" font-family="Arial, Helvetica, sans-serif" font-size="39" font-weight="700" letter-spacing="-1.1">NexusTrade</text>
+      <text x="188" y="135" fill="#F4F5F7" font-family="Arial, Helvetica, sans-serif" font-size="39" font-weight="700" letter-spacing="-1.1">BOTX</text>
       <text x="89" y="286" fill="#F7F8FA" font-family="Arial, Helvetica, sans-serif" font-size="66" font-weight="700" letter-spacing="-2.4">Trading, under control.</text>
       <text x="91" y="349" fill="#9CA3AF" font-family="Arial, Helvetica, sans-serif" font-size="25" font-weight="400">Bybit execution, TradingView automation, and live risk controls.</text>
       <rect x="89" y="411" width="1025" height="2" fill="url(#rule)"/>

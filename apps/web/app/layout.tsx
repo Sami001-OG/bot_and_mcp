@@ -6,20 +6,20 @@ const siteUrl = process.env.NEXT_PUBLIC_SITE_URL
   ?? process.env.VERCEL_URL
   ?? 'http://localhost:3000';
 const metadataBase = new URL(siteUrl.startsWith('http') ? siteUrl : `https://${siteUrl}`);
-const title = 'NexusTrade | Bybit Trading Command Center';
+const title = 'BOTX | Bybit Trading Command Center';
 const description = 'Secure Bybit execution, TradingView automation, portfolio monitoring, and live risk controls in one trading command center.';
 
 export const metadata: Metadata = {
   metadataBase,
   title: {
     default: title,
-    template: '%s | NexusTrade',
+    template: '%s | BOTX',
   },
   description,
-  applicationName: 'NexusTrade',
+  applicationName: 'BOTX',
   category: 'finance',
-  creator: 'NexusTrade',
-  publisher: 'NexusTrade',
+  creator: 'BOTX',
+  publisher: 'BOTX',
   referrer: 'origin-when-cross-origin',
   alternates: { canonical: '/' },
   manifest: '/manifest.webmanifest',
@@ -37,7 +37,7 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
-    title: 'NexusTrade',
+    title: 'BOTX',
   },
   formatDetection: { telephone: false, email: false, address: false },
   robots: {
@@ -49,7 +49,7 @@ export const metadata: Metadata = {
     type: 'website',
     locale: 'en_US',
     url: '/',
-    siteName: 'NexusTrade',
+    siteName: 'BOTX',
     title,
     description,
     images: [{
@@ -58,14 +58,14 @@ export const metadata: Metadata = {
       width: 1200,
       height: 630,
       type: 'image/png',
-      alt: 'NexusTrade - Trading, under control.',
+      alt: 'BOTX - Trading, under control.',
     }],
   },
   twitter: {
     card: 'summary_large_image',
     title,
     description,
-    images: [{ url: '/opengraph-image.png', alt: 'NexusTrade - Trading, under control.' }],
+    images: [{ url: '/opengraph-image.png', alt: 'BOTX - Trading, under control.' }],
   },
   other: {
     'msapplication-TileColor': '#080a0e',
