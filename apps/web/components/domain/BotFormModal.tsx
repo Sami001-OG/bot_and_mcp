@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { useApp } from '../layout/AppContext';
 import { apiFetch } from '../../lib/session';
 import { ALLOCATION_OPTIONS } from '../../lib/format';
@@ -7,6 +8,7 @@ import type { Allocation, BotConfig, BotCreateResult, BotDetail, BotSecretReveal
 import { Button } from '../ui/Button';
 import { Modal } from '../ui/Modal';
 import { SymbolPicker } from './SymbolPicker';
+import { Tab, TabBar } from '../ui/Tabs';
 import { botMcpUrl, webhookUrl } from './botUrls';
 
 const ACTION_OPTIONS = ['BUY', 'SELL', 'LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT', 'REVERSE', 'PARTIAL_EXIT'] as const;
@@ -44,6 +46,12 @@ export function BotFormModal({
 }) {
   const { toast } = useApp();
   const prefill = editTarget?.config;
+  const [market, setMarket] = useState<'SPOT' | 'USDT_FUTURES'>(prefill?.marketType === 'SPOT' ? 'SPOT' : 'USDT_FUTURES');
+  const switchMarket = (next: 'SPOT' | 'USDT_FUTURES') => {
+    if (next === market) return;
+    setMarket(next);
+    onSymbolsChange(symbols.filter((symbol) => (next === 'SPOT' ? !symbol.includes(':') : symbol.includes(':'))));
+  };
 
   const persistBot = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -60,7 +68,7 @@ export function BotFormModal({
       toast('error', 'Choose the exchange API this bot trades with.');
       return;
     }
-    const config: BotConfig = { symbols: parsedSymbols };
+    const config: BotConfig = { marketType: market, symbols: parsedSymbols };
     const allocationMode = String(form.get('allocationMode') ?? 'NONE');
     const allocationValue = String(form.get('allocationValue') ?? '').trim();
     if (allocationMode !== 'NONE' && allocationValue) {
@@ -160,19 +168,25 @@ export function BotFormModal({
             Trading API: {selected && selected.exchangeAccount ? `${selected.exchangeAccount.label ?? selected.exchangeAccount.exchange} ${selected.exchangeAccount.marketType}` : 'bound at creation'}
           </p>
         )}
+        <TabBar ariaLabel="Bot market type">
+          <Tab active={market === 'SPOT'} onClick={() => switchMarket('SPOT')}>Spot</Tab>
+          <Tab active={market === 'USDT_FUTURES'} onClick={() => switchMarket('USDT_FUTURES')}>Futures (USDT)</Tab>
+        </TabBar>
+        <p className="muted small">The market is fixed for this bot: {market === 'SPOT' ? 'spot trades 1:1 with your balance — no leverage.' : 'USDT-M perpetual futures — leverage applies to every entry.'} Capital per trade and symbols are saved permanently.</p>
         <SymbolPicker
           markets={markets}
           marketsError={marketsError}
           onRetryMarkets={onRetryMarkets}
           onChange={onSymbolsChange}
           selected={symbols}
+          marketType={market}
         />
         <div className="form-row">
-          <label>Allocation mode<select defaultValue={prefill?.allocation?.mode ?? 'NONE'} name="allocationMode">{ALLOCATION_OPTIONS.map((mode) => <option key={mode} value={mode}>{mode === 'NONE' ? 'Use signal size' : mode}</option>)}</select></label>
+          <label>Capital per trade — mode<select defaultValue={prefill?.allocation?.mode ?? 'NONE'} name="allocationMode">{ALLOCATION_OPTIONS.map((mode) => <option key={mode} value={mode}>{mode === 'NONE' ? 'Use signal size' : mode}</option>)}</select></label>
           <label>Amount / percent<input defaultValue={prefill?.allocation?.mode === 'FIXED_AMOUNT' ? prefill.allocation.amount : prefill?.allocation?.percent ?? ''} min="0.001" name="allocationValue" step="any" type="number" /></label>
         </div>
         <div className="form-row">
-          <label>Leverage<input defaultValue={prefill?.leverage ?? ''} min="1" max="200" name="leverage" type="number" /></label>
+          {market === 'USDT_FUTURES' && <label>Leverage<input defaultValue={prefill?.leverage ?? ''} min="1" max="200" name="leverage" type="number" /></label>}
           <label>Stop loss price<input defaultValue={prefill?.stopLoss ?? ''} name="stopLoss" placeholder="90000" type="text" /></label>
         </div>
         <label>Take profits (comma separated)<input defaultValue={prefill?.takeProfits?.join(', ') ?? ''} name="takeProfits" placeholder="100000, 110000" type="text" /></label>
@@ -218,12 +232,14 @@ export function BotFormModal({
           <p className="muted small">Comma separated, e.g. <code>2:30, 5:40, 10:30</code> closes 30% at +2%, 40% at +5%, 30% at +10%. Levels must sum to 100% or less.</p>
         </fieldset>
 
-        <fieldset className="action-field">
-          <legend>Trailing stop</legend>
-          <label className="checkbox"><input defaultChecked={prefill?.trailing?.enabled ?? false} name="trailingEnabled" type="checkbox" /> Attach a trailing stop to every entry</label>
-          <label>Callback %<input defaultValue={prefill?.trailing?.callbackPercent ?? 1.5} min="0.01" name="trailingCallbackPercent" step="any" type="number" /></label>
-          <p className="muted small">A reduce-only trailing stop activates at the entry price. Once price moves {prefill?.trailing?.callbackPercent ?? 1.5}% past the highest point, the stop follows the price. Can be combined with a fixed stop loss.</p>
-        </fieldset>
+        {market === 'USDT_FUTURES' && (
+          <fieldset className="action-field">
+            <legend>Trailing stop</legend>
+            <label className="checkbox"><input defaultChecked={prefill?.trailing?.enabled ?? false} name="trailingEnabled" type="checkbox" /> Attach a trailing stop to every entry</label>
+            <label>Callback %<input defaultValue={prefill?.trailing?.callbackPercent ?? 1.5} min="0.01" name="trailingCallbackPercent" step="any" type="number" /></label>
+            <p className="muted small">A reduce-only trailing stop activates at the entry price. Once price moves {prefill?.trailing?.callbackPercent ?? 1.5}% past the highest point, the stop follows the price. Can be combined with a fixed stop loss.</p>
+          </fieldset>
+        )}
         <div className="modal-actions">
           <Button onClick={onClose} variant="secondary">
             Cancel

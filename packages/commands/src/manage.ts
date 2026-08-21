@@ -1,5 +1,5 @@
 import { Prisma } from '@platform/database';
-import { MIN_ORDER_NOTIONAL_USD, marketTypeForSymbol, type BreakevenConfig, type DcaConfig, type ManagementOverrides, type MarketType, type PartialTpsConfig, type ResolvedOrderRequest, type WebhookBotConfig } from '@platform/contracts';
+import { MIN_ORDER_NOTIONAL_USD, type BreakevenConfig, type DcaConfig, type ManagementOverrides, type MarketType, type PartialTpsConfig, type ResolvedOrderRequest, type WebhookBotConfig } from '@platform/contracts';
 import { alignAmount } from '@platform/trading-core';
 import { evaluateOrder } from '@platform/risk-engine';
 import { prisma } from '@platform/database';
@@ -83,16 +83,6 @@ type ManageCtx = {
   openByClientOrderId: Set<string>;
 };
 
-function neededMarketTypes(symbols: string[], fallback: MarketType): MarketType[] {
-  const set = new Set<MarketType>();
-  for (const entry of symbols) {
-    if (entry === '*') { set.add('SPOT'); set.add('USDT_FUTURES'); continue; }
-    set.add(marketTypeForSymbol(entry));
-  }
-  if (set.size === 0) set.add(fallback);
-  return [...set];
-}
-
 function minNotionalOf(marketType: MarketType): string {
   return MIN_ORDER_NOTIONAL_USD[marketType] ?? MIN_ORDER_NOTIONAL_USD.USDT_FUTURES;
 }
@@ -164,7 +154,7 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
   if (session?.adapter) {
     runs.push({ adapter: session.adapter, marketType: session.marketType ?? ctx.account.marketType, disconnect: false });
   } else {
-    for (const marketType of neededMarketTypes(ctx.config.symbols, ctx.account.marketType)) {
+    for (const marketType of [ctx.config.marketType ?? ctx.account.marketType]) {
       try {
         const connection = await connectToAccount(ctx.account.id, marketType);
         runs.push({ adapter: connection.adapter, marketType, disconnect: true });

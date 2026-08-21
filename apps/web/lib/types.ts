@@ -55,6 +55,7 @@ export type PartialTpLevel = { pricePercent: number; closePercent: number };
 export type PartialTpsConfig = { enabled: boolean; levels: PartialTpLevel[] };
 export type TrailingConfig = { enabled: boolean; callbackPercent: number };
 export type BotConfig = {
+  marketType?: 'SPOT' | 'USDT_FUTURES';
   symbols: string[];
   allocation?: Allocation;
   leverage?: number;

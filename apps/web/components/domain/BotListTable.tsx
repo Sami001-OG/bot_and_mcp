@@ -72,7 +72,7 @@ export function BotListTable({
                 <tr className={selectedId === bot.id ? 'selected-row' : ''} key={bot.id} onClick={() => onSelect(bot.id)}>
                   <Td data-label="Bot">
                     <b>{bot.name}</b>
-                    <small className="muted block">{bot.type}{bot.exchangeAccount ? ` · ${bot.exchangeAccount.label ?? bot.exchangeAccount.exchange} ${bot.exchangeAccount.marketType}` : ''}</small>
+                    <small className="muted block">{bot.type} · {(bot.config.marketType ?? 'USDT_FUTURES') === 'SPOT' ? 'Spot' : 'Futures'}{bot.exchangeAccount ? ` · ${bot.exchangeAccount.label ?? bot.exchangeAccount.exchange}` : ''}</small>
                   </Td>
                   <Td data-label="Webhook" className="webhook-cell">
                     {bot.webhook ? (
@@ -118,7 +118,7 @@ export function BotListTable({
                 <strong>{bot.name}</strong>
                 <StatusBadge tone={STATUS_TONES[bot.status]}>{bot.status}</StatusBadge>
               </div>
-              <div className="mc-row"><span className="mc-label">Type</span><span className="mc-value">{bot.type}{bot.exchangeAccount ? ` · ${bot.exchangeAccount.label ?? bot.exchangeAccount.exchange}` : ''}</span></div>
+              <div className="mc-row"><span className="mc-label">Type</span><span className="mc-value">{bot.type} · {(bot.config.marketType ?? 'USDT_FUTURES') === 'SPOT' ? 'Spot' : 'Futures'}{bot.exchangeAccount ? ` · ${bot.exchangeAccount.label ?? bot.exchangeAccount.exchange}` : ''}</span></div>
               <div className="mc-row"><span className="mc-label">Version</span><span className="mc-value">v{bot.activeVersion}</span></div>
               <div className="mc-row"><span className="mc-label">Config</span><span className="mc-value" title={formatConfig(bot.config)}>{formatConfig(bot.config)}</span></div>
               {bot.webhook && (

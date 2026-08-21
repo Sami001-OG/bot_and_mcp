@@ -14,6 +14,15 @@ export function marketTypeForSymbol(symbol: string): MarketType {
   const settle = symbol.slice(colonIndex + 1);
   return quote !== undefined && settle.toUpperCase() === quote.toUpperCase() ? 'USDT_FUTURES' : 'COIN_FUTURES';
 }
+
+export function normalizeSymbolForMarket(symbol: string, marketType: 'SPOT' | 'USDT_FUTURES'): string | null {
+  const bare = (symbol.split(':')[0] ?? symbol).toUpperCase();
+  const [base, quote] = bare.split('/');
+  if (!base || !quote) return null;
+  if (marketType === 'SPOT') return bare;
+  if (quote !== 'USDT') return null;
+  return `${base}/USDT:USDT`;
+}
 export const OrderSide = z.enum(['BUY', 'SELL']);
 export type OrderSide = z.infer<typeof OrderSide>;
 export const PositionSide = z.enum(['LONG', 'SHORT', 'BOTH']);
@@ -173,6 +182,7 @@ export const PartialTpsConfigSchema = z.object({
 export type PartialTpsConfig = z.infer<typeof PartialTpsConfigSchema>;
 
 export const WebhookBotConfigSchema = z.object({
+  marketType: z.enum(['SPOT', 'USDT_FUTURES']).default('USDT_FUTURES'),
   symbols: z.array(z.string().min(3).max(40)).min(1),
   allocation: AllocationSchema.optional(),
   leverage: z.number().int().min(1).max(200).optional(),

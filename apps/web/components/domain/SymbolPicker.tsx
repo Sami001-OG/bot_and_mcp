@@ -4,11 +4,12 @@ import { useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { Market } from '../../lib/types';
 
-export function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, onChange }: { markets: Market[] | null; marketsError: string | null; onRetryMarkets: () => void; selected: string[]; onChange: (next: string[]) => void }) {
+export function SymbolPicker({ markets, marketsError, onRetryMarkets, selected, onChange, marketType }: { markets: Market[] | null; marketsError: string | null; onRetryMarkets: () => void; selected: string[]; onChange: (next: string[]) => void; marketType?: string }) {
   const [query, setQuery] = useState('');
   const [custom, setCustom] = useState('');
 
-  const scoped = (markets ?? []).filter((market) => market.type === 'spot' || market.type === 'swap');
+  const wantSpot = marketType?.toUpperCase() === 'SPOT';
+  const scoped = (markets ?? []).filter((market) => (wantSpot ? market.type === 'spot' : marketType ? market.type === 'swap' : market.type === 'spot' || market.type === 'swap'));
 
   const toggle = (symbol: string) => onChange(selected.includes(symbol) ? selected.filter((item) => item !== symbol) : [...selected, symbol]);
   const queryUpper = query.trim().toUpperCase();

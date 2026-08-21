@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BreakevenConfigSchema, DcaConfigSchema, PartialTpsConfigSchema, TradingViewSignalSchema, WebhookBotConfigSchema, marketTypeForSymbol, type MarketType } from '@platform/contracts';
+import { BreakevenConfigSchema, DcaConfigSchema, PartialTpsConfigSchema, TradingViewSignalSchema, WebhookBotConfigSchema, marketTypeForSymbol, normalizeSymbolForMarket, type MarketType } from '@platform/contracts';
 import { CommandError, breakevenTarget, buildRiskContext, dcaStepDue, managePrefix, mergeManagementOverrides, parseOrderBody, type AccountConfig } from './index.js';
 
 const testConfig: AccountConfig = { id: 'acc-1', exchange: 'bybit', marketType: 'SPOT', label: 'test', apiKey: 'k', secret: 's' };
@@ -184,5 +184,21 @@ describe('commands', () => {
     expect(marketTypeForSymbol('BTC/USD:BTCUSD')).toBe('COIN_FUTURES');
     expect(marketTypeForSymbol('ETH/USD:ETHUSD')).toBe('COIN_FUTURES');
     expect(marketTypeForSymbol('SOL/USDT:SOL')).toBe('COIN_FUTURES');
+  });
+
+  it('normalizes symbols to the bot market via normalizeSymbolForMarket', () => {
+    expect(normalizeSymbolForMarket('btc/usdt', 'SPOT')).toBe('BTC/USDT');
+    expect(normalizeSymbolForMarket('BTC/USDT:USDT', 'SPOT')).toBe('BTC/USDT');
+    expect(normalizeSymbolForMarket('BTC/USDT', 'USDT_FUTURES')).toBe('BTC/USDT:USDT');
+    expect(normalizeSymbolForMarket('BTC/USDT:USDT', 'USDT_FUTURES')).toBe('BTC/USDT:USDT');
+    expect(normalizeSymbolForMarket('SOL/USDT:SOL', 'USDT_FUTURES')).toBe('SOL/USDT:USDT');
+    expect(normalizeSymbolForMarket('BTC/USD', 'USDT_FUTURES')).toBeNull();
+    expect(normalizeSymbolForMarket('garbage', 'SPOT')).toBeNull();
+  });
+
+  it('defaults bot config marketType to USDT_FUTURES and accepts SPOT', () => {
+    expect(WebhookBotConfigSchema.parse({ symbols: ['BTC/USDT:USDT'] }).marketType).toBe('USDT_FUTURES');
+    expect(WebhookBotConfigSchema.parse({ marketType: 'SPOT', symbols: ['BTC/USDT'] }).marketType).toBe('SPOT');
+    expect(() => WebhookBotConfigSchema.parse({ marketType: 'COIN_FUTURES', symbols: ['BTC/USD'] })).toThrow();
   });
 });

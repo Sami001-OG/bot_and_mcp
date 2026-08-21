@@ -1,5 +1,5 @@
 import { prisma, type Bot } from '@platform/database';
-import { OrderRequestSchema, WebhookBotConfigSchema, marketTypeForSymbol, type ExchangeId, type OrderRequest, type WebhookBotConfig } from '@platform/contracts';
+import { OrderRequestSchema, WebhookBotConfigSchema, normalizeSymbolForMarket, type ExchangeId, type MarketType, type OrderRequest, type WebhookBotConfig } from '@platform/contracts';
 import { type ExchangeAdapter } from '@platform/exchange-core';
 import { connectToAccount, getAccountConfig, type AccountConfig } from './account.js';
 import { CommandError } from './errors.js';
@@ -56,13 +56,15 @@ export type BotPlaceOrderArgs = {
 
 export async function placeOrderThroughBot(botId: string, args: BotPlaceOrderArgs): Promise<PlaceOrderResult> {
   const ctx = await getBotTradeContext(botId);
-  const symbol = String(args.symbol).toUpperCase();
+  const marketType: MarketType = ctx.config.marketType ?? 'USDT_FUTURES';
+  const symbol = normalizeSymbolForMarket(String(args.symbol).toUpperCase(), marketType);
+  if (!symbol) throw new CommandError(409, 'SYMBOL_MARKET_MISMATCH', `Symbol ${String(args.symbol)} cannot trade on a ${marketType === 'SPOT' ? 'spot' : 'futures'} bot`);
   assertBotSymbol(ctx, symbol);
   const leverage = args.leverage === undefined ? (ctx.config.leverage ?? 1) : Number(args.leverage);
   const request: OrderRequest = {
     exchangeAccountId: ctx.account.id,
     exchange: ctx.account.exchange,
-    marketType: marketTypeForSymbol(symbol),
+    marketType,
     symbol,
     side: args.side,
     positionSide: (args.positionSide ?? 'BOTH') as OrderRequest['positionSide'],
@@ -95,14 +97,21 @@ export async function cancelOrderThroughBot(botId: string, orderId: string): Pro
 
 export async function closePositionThroughBot(botId: string, symbol: string): Promise<Record<string, unknown>> {
   const ctx = await getBotTradeContext(botId);
-  const normalized = String(symbol).toUpperCase();
+  const marketType: MarketType = ctx.config.marketType ?? 'USDT_FUTURES';
+  const normalized = normalizeSymbolForMarket(String(symbol).toUpperCase(), marketType);
+  if (!normalized) return { ok: true, closed: false, reason: `Symbol ${symbol} cannot trade on a ${marketType === 'SPOT' ? 'spot' : 'futures'} bot` };
   assertBotSymbol(ctx, normalized);
-  const marketType = marketTypeForSymbol(normalized);
   let position: { symbol: string; side: 'LONG' | 'SHORT'; quantity: string; entryPrice: string } | undefined;
   const session = await connectToAccount(ctx.account.id, marketType);
   try {
     const found = (await session.adapter.getPositions()).find((entry) => entry.symbol.toUpperCase() === normalized.split(':')[0]);
     if (found) position = { symbol: found.symbol, side: found.side as 'LONG' | 'SHORT', quantity: String(found.quantity), entryPrice: String(found.entryPrice) };
+    else if (marketType === 'SPOT') {
+      const base = normalized.split('/')[0] ?? '';
+      const holding = (await session.adapter.getBalance().catch(() => [])).find((entry) => entry.asset.toUpperCase() === base.toUpperCase());
+      const free = Number(holding?.free ?? 0);
+      if (Number.isFinite(free) && free > 0) position = { symbol: normalized, side: 'LONG', quantity: String(free), entryPrice: '0' };
+    }
   } finally {
     await session.adapter.disconnect().catch(() => undefined);
   }
@@ -134,10 +143,11 @@ export async function closeAllThroughBot(botId: string): Promise<Awaited<ReturnT
 
 export async function changeLeverageThroughBot(botId: string, symbol: string, leverage: number): Promise<Record<string, unknown>> {
   const ctx = await getBotTradeContext(botId);
-  const normalized = String(symbol).toUpperCase();
+  const marketType: MarketType = ctx.config.marketType ?? 'USDT_FUTURES';
+  const normalized = normalizeSymbolForMarket(String(symbol).toUpperCase(), marketType);
+  if (!normalized) throw new CommandError(409, 'SYMBOL_MARKET_MISMATCH', `Symbol ${String(symbol)} cannot trade on a ${marketType === 'SPOT' ? 'spot' : 'futures'} bot`);
   assertBotSymbol(ctx, normalized);
-  const marketType = marketTypeForSymbol(normalized);
-  if (marketType === 'SPOT') throw new CommandError(400, 'LEVERAGE_UNSUPPORTED_SPOT', `Leverage is not supported on spot market ${normalized}`);
+  if (marketType === 'SPOT') throw new CommandError(400, 'LEVERAGE_UNSUPPORTED_SPOT', `Leverage is not supported on spot bot ${ctx.bot.name}`);
   const session = await connectToAccount(ctx.account.id, marketType);
   try {
     const result = await session.adapter.setLeverage(normalized, leverage);

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WebhookBotConfigSchema, TradingViewSignalSchema, marketTypeForSymbol, type PositionSide, type ResolvedOrderRequest, type TradingViewSignal, type WebhookBotConfig } from '@platform/contracts';
+import { WebhookBotConfigSchema, TradingViewSignalSchema, normalizeSymbolForMarket, type PositionSide, type ResolvedOrderRequest, type TradingViewSignal, type WebhookBotAction, type WebhookBotConfig } from '@platform/contracts';
 import { prisma, Prisma, type Bot } from '@platform/database';
 import { buildWebhookOrders } from '@platform/bot-engine';
 import { hashToken } from '@platform/security';
@@ -127,51 +127,71 @@ export type BotRunResult = {
 export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signal: TradingViewSignal, policy: RiskPolicy, context: { deliveryId?: string } = {}): Promise<BotRunResult> {
   const runMetrics: Record<string, unknown> = { ...(context.deliveryId ? { deliveryId: context.deliveryId } : {}), nonce: signal.nonce, action: signal.action, symbol: signal.symbol };
   const run = await prisma.botRun.create({ data: { botId: bot.id, status: 'ACTIVE', metrics: runMetrics as unknown as Prisma.InputJsonValue } });
-  const [breaker, accountConfig] = await Promise.all([checkCircuitBreaker(), getAccountConfig(bot.exchangeAccountId ?? undefined)]);
+  const finish = async (status: 'STOPPED' | 'ERROR', patch: Partial<BotRunResult> & { notes?: string[]; skipped?: string[] }, error?: string): Promise<BotRunResult> => {
+    if (error) runMetrics.error = error;
+    if (patch.notes?.length) runMetrics.notes = patch.notes;
+    if (patch.skipped?.length) runMetrics.skipped = patch.skipped;
+    await prisma.botRun.update({ where: { id: run.id }, data: { status, stoppedAt: new Date(), metrics: runMetrics as unknown as Prisma.InputJsonValue } });
+    return { runId: run.id, status, orders: [], orderResults: [], skipped: patch.skipped ?? [], notes: patch.notes ?? [], price: null, positionSide: null, ...(error ? { error } : {}) };
+  };
   let session: Awaited<ReturnType<typeof connectToAccount>> | undefined;
   try {
+    const botMarketType = config.marketType ?? 'USDT_FUTURES';
+    const normalizedSymbol = normalizeSymbolForMarket(signal.symbol, botMarketType);
+    if (!normalizedSymbol) {
+      return await finish('STOPPED', { skipped: [`Symbol ${signal.symbol} cannot trade on a ${botMarketType === 'SPOT' ? 'spot' : 'USDT futures'} bot`] });
+    }
+    const signalBare = (signal.symbol.split(':')[0] ?? signal.symbol).toUpperCase();
+    const skippedEarly: string[] = [];
+    if (!config.symbols.some((entry) => entry === '*' || (entry.split(':')[0] ?? entry).toUpperCase() === signalBare)) skippedEarly.push(`Symbol ${signal.symbol} not in configured bot symbols`);
+    else if (config.actions && !config.actions.includes(signal.action as WebhookBotAction)) skippedEarly.push(`Action ${signal.action} not in configured bot actions`);
+    if (skippedEarly.length > 0) return await finish('STOPPED', { skipped: skippedEarly });
+    const [breaker, accountConfig] = await Promise.all([checkCircuitBreaker(), getAccountConfig(bot.exchangeAccountId ?? undefined)]);
     if (!breaker.ok) {
       await queueNotification({ channel: 'breaker', severity: 'CRITICAL', title: 'Circuit breaker blocked bot run', message: breaker.reason, payload: { botId: bot.id, signal: signal.nonce, ...breaker } });
-      runMetrics.notes = [`Circuit breaker: ${breaker.reason}`];
-      await prisma.botRun.update({ where: { id: run.id }, data: { status: 'STOPPED', stoppedAt: new Date(), metrics: runMetrics as unknown as Prisma.InputJsonValue } });
-      return { runId: run.id, status: 'STOPPED', orders: [], orderResults: [], skipped: [], notes: [breaker.reason], price: null, positionSide: null };
+      return await finish('STOPPED', { notes: [`Circuit breaker: ${breaker.reason}`] });
+    }
+    if (signal.exchange.toLowerCase() !== accountConfig.exchange.toLowerCase()) {
+      return await finish('STOPPED', { skipped: [`Exchange ${signal.exchange} does not match bot account ${accountConfig.exchange}`] });
     }
     const overrides: ManagementOverrides = {
       ...(signal.dca ? { dca: signal.dca } : {}),
       ...(signal.breakeven ? { breakeven: signal.breakeven } : {}),
       ...(signal.partialTps ? { partialTps: signal.partialTps } : {})
     };
-    const runMarketType = marketTypeForSymbol(signal.symbol);
-    session = await connectToAccount(bot.exchangeAccountId ?? undefined, runMarketType, accountConfig);
-    if (signal.action === 'MANAGE') {
-      const managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config, marketType: runMarketType });
+    const effectiveSignal = { ...signal, symbol: normalizedSymbol };
+    session = await connectToAccount(bot.exchangeAccountId ?? undefined, botMarketType, accountConfig);
+    if (effectiveSignal.action === 'MANAGE') {
+      const managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config, marketType: botMarketType });
       runMetrics.managed = managed as unknown as Prisma.InputJsonValue;
       runMetrics.orders = [];
       await prisma.botRun.update({ where: { id: run.id }, data: { status: 'STOPPED', stoppedAt: new Date(), metrics: runMetrics as unknown as Prisma.InputJsonValue } });
       return { runId: run.id, status: 'STOPPED', orders: [], orderResults: [], skipped: [], notes: [], price: null, positionSide: null, managed };
     }
-    const settings = await getSettings();
-    const equity = settings.equity ?? '0';
-    const maxEquity = settings.peakEquity ?? equity;
-    const quote = (signal.symbol.split('/')[1] ?? 'USDT').split(':')[0] ?? 'USDT';
-    const base = (signal.symbol.split('/')[0] ?? '').split(':')[0] ?? '';
-    const [price, balances, position, precision] = await Promise.all([
-      session.adapter.getPrice(signal.symbol).catch(() => undefined),
-      session.adapter.getBalance().catch(() => []),
-      session.adapter.getPositions().catch(() => []).then((positions) => positions.find((entry) => entry.symbol.toUpperCase() === (signal.symbol.split(':')[0] ?? signal.symbol).toUpperCase())),
-      marketPrecisionOf(session.adapter, signal.symbol).catch(() => null),
+    const isEntry = ['BUY', 'LONG', 'SELL', 'SHORT'].includes(effectiveSignal.action);
+    const needsPositionState = ['CLOSE_LONG', 'CLOSE_SHORT', 'PARTIAL_EXIT', 'REVERSE'].includes(effectiveSignal.action);
+    const needsPrice = isEntry || effectiveSignal.action === 'REVERSE';
+    const base = (normalizedSymbol.split('/')[0] ?? '').split(':')[0] ?? '';
+    const [price, balances, position, precision, settings] = await Promise.all([
+      needsPrice ? session.adapter.getPrice(normalizedSymbol).catch(() => undefined) : Promise.resolve(undefined as string | undefined),
+      botMarketType === 'SPOT' && needsPositionState ? session.adapter.getBalance().catch(() => []) : Promise.resolve([]),
+      needsPositionState ? session.adapter.getPositions().catch(() => []).then((positions) => positions.find((entry) => entry.symbol.toUpperCase() === normalizedSymbol.split(':')[0]?.toUpperCase())) : Promise.resolve(undefined),
+      needsPrice ? marketPrecisionOf(session.adapter, normalizedSymbol).catch(() => null) : Promise.resolve(null),
+      needsPrice ? getSettings() : Promise.resolve(null),
     ]);
+    const equity = settings?.equity ?? '0';
+    const maxEquity = settings?.peakEquity ?? equity;
     let currentPositionSide: PositionSide | undefined;
     let positionQuantity: number | undefined;
     if (position && position.side !== 'BOTH') {
       currentPositionSide = position.side;
       positionQuantity = Number(position.quantity);
-    } else if (runMarketType === 'SPOT' && base) {
+    } else if (botMarketType === 'SPOT' && base) {
       const holding = balances.find((entry) => entry.asset.toUpperCase() === base.toUpperCase());
       const free = Number(holding?.free ?? 0);
       if (Number.isFinite(free) && free > 0) { currentPositionSide = 'LONG'; positionQuantity = free; }
     }
-    const result = buildWebhookOrders({ signal, config, account: { id: accountConfig.id, exchange: accountConfig.exchange, marketType: accountConfig.marketType }, botId: bot.id, ...(price === undefined ? {} : { price }), ...(positionQuantity === undefined ? {} : { positionQuantity }), equity, maxEquity, ...(currentPositionSide === undefined ? {} : { currentPositionSide }), ...(precision ? { precision } : {}) });
+    const result = buildWebhookOrders({ signal: effectiveSignal, config, account: { id: accountConfig.id, exchange: accountConfig.exchange, marketType: botMarketType }, botId: bot.id, ...(price === undefined ? {} : { price }), ...(positionQuantity === undefined ? {} : { positionQuantity }), equity, maxEquity, ...(currentPositionSide === undefined ? {} : { currentPositionSide }), ...(precision ? { precision } : {}) });
     const created: string[] = [];
     const orderResults: BotRunResult['orderResults'] = [];
     for (const order of result.orders) {
@@ -196,7 +216,7 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
     const effectiveConfig = mergeManagementOverrides(config, overrides);
     if (effectiveConfig.dca?.enabled || effectiveConfig.breakeven?.enabled || effectiveConfig.partialTps?.enabled) {
       try {
-        managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config, marketType: runMarketType });
+        managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config, marketType: botMarketType });
         runMetrics.managed = managed as unknown as Prisma.InputJsonValue;
       } catch (error) {
         runMetrics.managedError = error instanceof Error ? error.message.slice(0, 300) : String(error);
