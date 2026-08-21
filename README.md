@@ -885,7 +885,7 @@ Write tools (all through the risk engine, synchronous):
 | Tool | What it does |
 |---|---|
 | `placeOrder` | Place a live order **through a bot** — `botId` is required (every trade runs through a bot; on the per-bot server it's injected) |
-| `cancelOrder` | Cancel an open order of the bot account |
+| `cancelOrder` | Cancel an open order of the bot account — accepts either a platform order id (24-hex) or a live exchange-order id (from `getOrders`) |
 | `closePosition` | Reduce-only market close for a symbol on the bot account |
 | `closeAll` | Close every open position on the bot account |
 | `changeLeverage` | Set leverage for a futures instrument on the bot account |
