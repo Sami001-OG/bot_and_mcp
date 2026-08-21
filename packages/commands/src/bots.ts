@@ -144,7 +144,7 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
     const signalBare = (signal.symbol.split(':')[0] ?? signal.symbol).toUpperCase();
     const skippedEarly: string[] = [];
     if (!config.symbols.some((entry) => entry === '*' || (entry.split(':')[0] ?? entry).toUpperCase() === signalBare)) skippedEarly.push(`Symbol ${signal.symbol} not in configured bot symbols`);
-    else if (config.actions && !config.actions.includes(signal.action as WebhookBotAction)) skippedEarly.push(`Action ${signal.action} not in configured bot actions`);
+    else if (signal.action !== 'MANAGE' && config.actions && !config.actions.includes(signal.action as WebhookBotAction)) skippedEarly.push(`Action ${signal.action} not in configured bot actions`);
     if (skippedEarly.length > 0) return await finish('STOPPED', { skipped: skippedEarly });
     const [breaker, accountConfig] = await Promise.all([checkCircuitBreaker(), getAccountConfig(bot.exchangeAccountId ?? undefined)]);
     if (!breaker.ok) {
