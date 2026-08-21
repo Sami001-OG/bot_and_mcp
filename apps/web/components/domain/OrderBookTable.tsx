@@ -8,7 +8,6 @@ import { StatusBadge } from '../ui/StatusBadge';
 import { Table, Td, Th, TableScroll } from '../ui/Table';
 import { Tab, TabBar } from '../ui/Tabs';
 import { EmptyState } from '../ui/EmptyState';
-import { CopyButton } from '../ui/CopyButton';
 
 const ORDER_FILTERS: Array<{ id: 'SPOT' | 'USDT_FUTURES' | 'ALL'; label: string }> = [
   { id: 'ALL', label: 'All markets' },
