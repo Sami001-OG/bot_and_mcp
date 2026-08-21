@@ -19,17 +19,17 @@ export async function filledQuantityOf(orderId: string): Promise<number> {
 }
 
 export async function updatePositionLedger(order: OrderIntent, quantity: string, price: string, fee: string): Promise<void> {
-  if (order.marketType === 'SPOT') return;
-  const existing = await prisma.position.findFirst({ where: { symbol: order.symbol, ...(order.positionSide === 'BOTH' ? {} : { side: order.positionSide }) } });
+  const existing = await prisma.position.findFirst({ where: { symbol: order.symbol, ...(order.positionSide === 'BOTH' || order.marketType === 'SPOT' ? {} : { side: order.positionSide }) } });
   const base: PositionSnapshot = existing ? { side: existing.side as PositionSnapshot['side'], quantity: existing.quantity, averageEntryPrice: existing.averageEntryPrice, realizedPnl: existing.realizedPnl } : { side: 'BOTH', quantity: '0', averageEntryPrice: '0', realizedPnl: '0' };
   const next = applyFill(base, order.side as 'BUY' | 'SELL', quantity, price);
   const realizedPnl = new Prisma.Decimal(next.realizedPnl).sub(new Prisma.Decimal(fee)).toFixed(18);
+  const ledgerSide = order.marketType === 'SPOT' ? 'LONG' : next.side;
   if (next.quantity === '0' || next.quantity === '0.000000000000000000') {
-    await prisma.position.deleteMany({ where: { symbol: order.symbol, ...(order.positionSide === 'BOTH' ? {} : { side: order.positionSide }) } });
+    await prisma.position.deleteMany({ where: { symbol: order.symbol, ...(order.positionSide === 'BOTH' || order.marketType === 'SPOT' ? {} : { side: order.positionSide }) } });
     return;
   }
-  if (existing && existing.side !== next.side) {
-    const conflict = await prisma.position.findUnique({ where: { symbol_side: { symbol: order.symbol, side: next.side } } });
+  if (existing && existing.side !== ledgerSide) {
+    const conflict = await prisma.position.findUnique({ where: { symbol_side: { symbol: order.symbol, side: ledgerSide } } });
     if (conflict) {
       await prisma.position.update({ where: { id: conflict.id }, data: { quantity: next.quantity, averageEntryPrice: next.averageEntryPrice, realizedPnl: new Prisma.Decimal(conflict.realizedPnl).add(new Prisma.Decimal(realizedPnl)).toFixed(18) } });
     }
@@ -37,9 +37,9 @@ export async function updatePositionLedger(order: OrderIntent, quantity: string,
     if (conflict) return;
   }
   await prisma.position.upsert({
-    where: { symbol_side: { symbol: order.symbol, side: next.side } },
+    where: { symbol_side: { symbol: order.symbol, side: ledgerSide } },
     update: { quantity: next.quantity, averageEntryPrice: next.averageEntryPrice, realizedPnl },
-    create: { symbol: order.symbol, side: next.side, marginMode: order.marginMode ?? 'ISOLATED', quantity: next.quantity, averageEntryPrice: next.averageEntryPrice, markPrice: price, leverage: order.leverage ?? 1, unrealizedPnl: '0', realizedPnl },
+    create: { symbol: order.symbol, side: ledgerSide, marginMode: order.marketType === 'SPOT' ? 'CROSS' : (order.marginMode ?? 'ISOLATED'), quantity: next.quantity, averageEntryPrice: next.averageEntryPrice, markPrice: price, leverage: order.leverage ?? 1, unrealizedPnl: '0', realizedPnl },
   });
 }
 

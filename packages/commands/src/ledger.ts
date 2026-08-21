@@ -27,28 +27,39 @@ export async function checkCircuitBreaker(): Promise<CircuitBreaker> {
 export type LedgerPosition = { symbol: string; side: PositionSide; quantity: string; averageEntryPrice: string; markPrice: string; unrealizedPnl: string; leverage: number; liquidationPrice?: string; marginMode: MarginMode };
 
 export async function syncPositionsFromExchange(): Promise<{ positions: LedgerPosition[] }> {
-  const { adapter } = await connectToAccount();
-  try {
-    const positions = await adapter.getPositions();
-    const mapped: LedgerPosition[] = positions.map((position) => ({ symbol: position.symbol, side: position.side, quantity: position.quantity, averageEntryPrice: position.entryPrice, markPrice: position.markPrice, unrealizedPnl: position.unrealizedPnl, leverage: position.leverage, ...(position.liquidationPrice ? { liquidationPrice: position.liquidationPrice } : {}), marginMode: position.marginMode }));
-    const liveKeys = new Set<string>();
-    for (const position of mapped) {
-      const symbol = adapter.resolveMarketSymbol(position.symbol);
-      liveKeys.add(`${symbol}|${position.side}`);
-      await prisma.position.updateMany({
-        where: { symbol, side: position.side },
-        data: { markPrice: position.markPrice, unrealizedPnl: position.unrealizedPnl, leverage: position.leverage, marginMode: position.marginMode, ...(position.liquidationPrice ? { liquidationPrice: position.liquidationPrice } : { liquidationPrice: null }) },
-      });
+  const mapped: LedgerPosition[] = [];
+  const liveKeys = new Set<string>();
+  const markLive = async (marketType?: 'SPOT' | 'USDT_FUTURES'): Promise<void> => {
+    let adapter;
+    try {
+      const session = await connectToAccount(undefined, marketType);
+      adapter = session.adapter;
+    } catch {
+      return;
     }
-    const stale = await prisma.position.findMany({ select: { id: true, symbol: true, side: true, quantity: true } });
-    const staleIds = stale.filter((row) => Number(row.quantity) > 0 && !liveKeys.has(`${row.symbol}|${row.side}`)).map((row) => row.id);
-    if (staleIds.length > 0) {
-      await prisma.position.updateMany({ where: { id: { in: staleIds } }, data: { quantity: '0', unrealizedPnl: '0', markPrice: '0' } });
+    try {
+      const positions = await adapter.getPositions();
+      for (const position of positions) {
+        const symbol = adapter.resolveMarketSymbol(position.symbol);
+        liveKeys.add(`${symbol}|${position.side}`);
+        await prisma.position.updateMany({
+          where: { symbol, side: position.side },
+          data: { markPrice: position.markPrice, unrealizedPnl: position.unrealizedPnl, leverage: position.leverage, marginMode: position.marginMode, ...(position.liquidationPrice ? { liquidationPrice: position.liquidationPrice } : { liquidationPrice: null }) },
+        });
+        mapped.push({ symbol, side: position.side, quantity: position.quantity, averageEntryPrice: position.entryPrice, markPrice: position.markPrice, unrealizedPnl: position.unrealizedPnl, leverage: position.leverage, ...(position.liquidationPrice ? { liquidationPrice: position.liquidationPrice } : {}), marginMode: position.marginMode });
+      }
+    } finally {
+      await adapter.disconnect().catch(() => undefined);
     }
-    return { positions: mapped };
-  } finally {
-    await adapter.disconnect().catch(() => undefined);
+  };
+  await markLive('USDT_FUTURES');
+  await markLive('SPOT');
+  const stale = await prisma.position.findMany({ select: { id: true, symbol: true, side: true, quantity: true } });
+  const staleIds = stale.filter((row) => Number(row.quantity) > 0 && !liveKeys.has(`${row.symbol}|${row.side}`)).map((row) => row.id);
+  if (staleIds.length > 0) {
+    await prisma.position.updateMany({ where: { id: { in: staleIds } }, data: { quantity: '0', unrealizedPnl: '0', markPrice: '0' } });
   }
+  return { positions: mapped };
 }
 
 export type LiveLedgerPosition = {
@@ -69,40 +80,47 @@ export type LiveLedgerPosition = {
 export async function liveLedgerPositions(): Promise<{ rows: LiveLedgerPosition[]; live: boolean }> {
   const rows = await listLedgerPositions();
   try {
-    const { adapter } = await connectToAccount();
-    try {
-      const positions = await adapter.getPositions();
-      const liveByKey = new Map<string, Position>();
-      for (const position of positions) {
-        liveByKey.set(`${adapter.resolveMarketSymbol(position.symbol)}|${position.side}`, position);
+    const liveByKey = new Map<string, Position>();
+    for (const marketType of ['USDT_FUTURES', 'SPOT'] as const) {
+      try {
+        const { adapter } = await connectToAccount(undefined, marketType);
+        try {
+          const positions = await adapter.getPositions();
+          for (const position of positions) {
+            liveByKey.set(`${adapter.resolveMarketSymbol(position.symbol)}|${position.side}`, position);
+          }
+        } finally {
+          await adapter.disconnect().catch(() => undefined);
+        }
+      } catch {
+        /* market unavailable for this account — skip */
       }
-      const overlaid: LiveLedgerPosition[] = rows.map((row) => {
-        const live = liveByKey.get(`${row.symbol}|${row.side}`);
-        if (live) {
-          const base = {
-            symbol: row.symbol,
-            side: row.side,
-            quantity: live.quantity,
-            averageEntryPrice: live.entryPrice,
-            markPrice: live.markPrice,
-            unrealizedPnl: live.unrealizedPnl,
-            realizedPnl: row.realizedPnl,
-            leverage: live.leverage,
-            marginMode: live.marginMode,
-            updatedAt: row.updatedAt,
-            live: true,
-          };
-          return live.liquidationPrice ? { ...base, liquidationPrice: live.liquidationPrice } : base;
-        }
-        if (Number(row.quantity) > 0) {
-          return { symbol: row.symbol, side: row.side, quantity: '0', averageEntryPrice: row.averageEntryPrice, markPrice: '0', unrealizedPnl: '0', realizedPnl: row.realizedPnl, leverage: row.leverage, marginMode: row.marginMode, updatedAt: row.updatedAt, live: true };
-        }
-        return { symbol: row.symbol, side: row.side, quantity: row.quantity, averageEntryPrice: row.averageEntryPrice, markPrice: row.markPrice, unrealizedPnl: row.unrealizedPnl, realizedPnl: row.realizedPnl, leverage: row.leverage, ...(row.liquidationPrice ? { liquidationPrice: row.liquidationPrice } : {}), marginMode: row.marginMode, updatedAt: row.updatedAt, live: true };
-      });
-      return { rows: overlaid, live: true };
-    } finally {
-      await adapter.disconnect().catch(() => undefined);
     }
+    if (liveByKey.size === 0) return { rows: rows.map((row) => ({ ...row, live: false })), live: false };
+    const overlaid: LiveLedgerPosition[] = rows.map((row) => {
+      const live = liveByKey.get(`${row.symbol}|${row.side}`);
+      if (live) {
+        const base = {
+          symbol: row.symbol,
+          side: row.side,
+          quantity: live.quantity,
+          averageEntryPrice: live.entryPrice,
+          markPrice: live.markPrice,
+          unrealizedPnl: live.unrealizedPnl,
+          realizedPnl: row.realizedPnl,
+          leverage: live.leverage,
+          marginMode: live.marginMode,
+          updatedAt: row.updatedAt,
+          live: true,
+        };
+        return live.liquidationPrice ? { ...base, liquidationPrice: live.liquidationPrice } : base;
+      }
+      if (Number(row.quantity) > 0) {
+        return { symbol: row.symbol, side: row.side, quantity: '0', averageEntryPrice: row.averageEntryPrice, markPrice: '0', unrealizedPnl: '0', realizedPnl: row.realizedPnl, leverage: row.leverage, marginMode: row.marginMode, updatedAt: row.updatedAt, live: true };
+      }
+      return { symbol: row.symbol, side: row.side, quantity: row.quantity, averageEntryPrice: row.averageEntryPrice, markPrice: row.markPrice, unrealizedPnl: row.unrealizedPnl, realizedPnl: row.realizedPnl, leverage: row.leverage, ...(row.liquidationPrice ? { liquidationPrice: row.liquidationPrice } : {}), marginMode: row.marginMode, updatedAt: row.updatedAt, live: true };
+    });
+    return { rows: overlaid, live: true };
   } catch {
     return { rows: rows.map((row) => ({ ...row, live: false })), live: false };
   }

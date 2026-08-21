@@ -100,10 +100,10 @@ Go to **Bots** (`/bots`):
   - **Leverage** — 1–200 (futures).
   - **Stop loss price** — optional fixed SL price; orders will attach a reduce-only SL bracket.
   - **Take profits** — optional comma-separated prices, e.g. `100000, 110000`; each becomes a reduce-only TP bracket order.
-  - **Trailing stop** — optional `callbackPercent` (0.01–10, e.g. `1.5` = 1.5%). Every entry gets a reduce-only trailing-stop order activated at the entry price: once price moves `callbackPercent`% past the best (highest for longs / lowest for shorts) price, the stop follows it, locking in profit on pullbacks. It can be combined with a fixed SL (disaster stop) — the fixed SL stays in place and the trailing stop rides above it. Trailing works for both futures and spot entries.
+   - **Trailing stop** — optional `callbackPercent` (0.01–10, e.g. `1.5` = 1.5%). Every **futures** entry gets a reduce-only trailing-stop order activated at the entry price: once price moves `callbackPercent`% past the best (highest for longs / lowest for shorts) price, the stop follows it, locking in profit on pullbacks. It can be combined with a fixed SL (disaster stop) — the fixed SL stays in place and the trailing stop rides above it. Not available on spot bots (Bybit spot has no trailing-stop order type); signals requesting it on a spot bot skip it with a recorded note.
   - **Require stop loss before entering** — when checked, signals without a `stop_loss` are skipped.
   - **Allowed signal actions** — checkbox allowlist: `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`. Signals with other actions are ignored.
-  - **Position-management capabilities** (evaluated on every bot run, and on demand via the MCP `manageBot` tool, or triggered by the webhook `MANAGE` action):
+  - **Position-management capabilities** (evaluated on every bot run, and on demand via the MCP `manageBot` tool, or triggered by the webhook `MANAGE` action; all three work on **both futures and spot** bots — spot positions are tracked via the fill ledger with weighted-average entry prices):
     - **DCA — average down**: add to a losing position when price drops `triggerDropPercent`% below entry. `stepDropPercent` (optional) spaces subsequent steps further out; each step adds `amount` (fixed $ or % of equity), up to `maxSteps` steps, one step per run. Example: 3% trigger, $50 steps, 3 max → steps at −3%, −6%, −9%.
     - **Breakeven stop-loss move**: when price moves `moveAtProfitPercent`% in favor, the stop loss is moved to entry (or `safeProfitPercent` above/below entry for longs/shorts if set). One move per position — state is tracked per bot.
     - **Partial take-profit claims**: comma-separated `price%:close%` levels, e.g. `2:30, 5:40, 10:30`. When price reaches a level the bot closes that percentage of the position at market (or rests a reduce-only TP trigger order at the level so the claim happens when price arrives). Levels must sum to ≤ 100%.
@@ -616,6 +616,28 @@ Bots are **market-typed**. Your symbol is normalized to the bot's market before 
 | `USDT_FUTURES` | `BTC/USD` (non-USDT quote) | **rejected** | futures bots trade USDT-quoted pairs only |
 
 Routing happens **before** any network I/O: a mismatched symbol/action/exchange is answered with the normal `202` and recorded as a skipped reason on the bot run — cheap for both sides. Spot bots have no leverage and no trailing stops (requested trailing is skipped with a note); spot CLOSE/PARTIAL_EXIT operate on free base balance.
+
+### Feature compatibility — spot vs futures bots
+
+Every webhook capability works on **both** bot market types unless marked otherwise. Verified behavior:
+
+| Webhook feature | Futures bot | Spot bot | How it works |
+|---|---|---|---|
+| Entry `BUY`/`LONG`/`SELL`/`SHORT` | ✓ | ✓ | Market order; futures apply leverage/position-mode handling, spot trades 1:1 against balance. |
+| Capital-per-trade allocation (fixed $ / % equity / % peak equity / risk %) | ✓ | ✓ | Bot-side sizing; on spot the sizing is leverage-free. Overrides signal `size` when configured. |
+| Leverage (`leverage` field or bot config) | ✓ | n/a — ignored | Spot has no leverage; the field is schema-valid but inert on spot bots. |
+| Fixed stop-loss bracket (`stop_loss` or bot config) | ✓ | ✓ | Reduce-only-style conditional stop-market; Bybit spot conditionals are mapped automatically (no `triggerDirection`). |
+| Take-profit brackets (`take_profit[]` or bot config) | ✓ | ✓ | Conditional TP-market orders splitting the entry quantity evenly. |
+| Trailing stop (`trailing` or bot config) | ✓ | **skipped** (run note) | Bybit spot has no trailing-stop order type; everything else in the signal still executes. |
+| `CLOSE_LONG` / `CLOSE_SHORT` | ✓ | ✓ | Futures: real exchange position quantity. Spot: sells the **free base balance** (fee-haircut clamped). |
+| `PARTIAL_EXIT` / `REVERSE` | ✓ | ✓ | Position state: futures from exchange positions; spot from the fill ledger + free balance. |
+| **DCA** (saved config or ephemeral `dca`) | ✓ | ✓ | Futures: entry/mark from exchange positions. Spot: average entry price and quantity are tracked by BOTX's fill ledger, mark price fetched live. Adds market entries on trigger. |
+| **Breakeven SL move** (saved config or ephemeral `breakeven`) | ✓ | ✓ | Cancels the previous managed SL and places a new conditional stop at entry (+ safe profit). Works identically on both markets. |
+| **Partial TPs** (saved config or ephemeral `partialTps`) | ✓ | ✓ | Market claims at reached levels + resting conditional TP orders for pending levels; resting orders are consumed on fill. Both markets. |
+| Ephemeral overrides combine with any action (incl. `MANAGE`) | ✓ | ✓ | Same semantics; `trailing` override is the only spot-degraded piece. |
+
+Spot position tracking detail: spot holdings have no exchange-side position object, so BOTX maintains them in its fill ledger — every recorded fill updates quantity and weighted-average entry price per symbol. That is what powers DCA triggers ("price dropped X% below *my* average entry"), breakeven targets, partial-TP percentages, and spot CLOSE sizing on spot bots. Selling your full balance clears the ledger row automatically; the cron sync never wipes live spot rows.
+
 
 ### Nonce, timestamp, retries — read this before wiring retries
 

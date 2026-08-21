@@ -167,7 +167,19 @@ export async function manageBotPositions(botId: string, overrides?: ManagementOv
     const adapter = run.adapter;
     const sessionCtx: ManageSession = { ...(ctx.account ? { config: ctx.account } : {}), adapter };
     try {
-      const positions = await adapter.getPositions();
+      let positions: Array<{ symbol: string; side: string; quantity: string; entryPrice: string; markPrice: string }>;
+      if (run.marketType === 'SPOT') {
+        const rows = await prisma.position.findMany({ where: { side: 'LONG' }, select: { symbol: true, quantity: true, averageEntryPrice: true, markPrice: true } });
+        positions = [];
+        for (const row of rows) {
+          if (!Number.isFinite(Number(row.quantity)) || Number(row.quantity) <= 0) continue;
+          if (!ctx.config.symbols.some((entry) => entry === '*' || (entry.split(':')[0] ?? entry).toUpperCase() === row.symbol.toUpperCase())) continue;
+          const price = await adapter.getPrice(row.symbol).catch(() => row.markPrice);
+          positions.push({ symbol: row.symbol, side: 'LONG', quantity: row.quantity, entryPrice: row.averageEntryPrice, markPrice: price });
+        }
+      } else {
+        positions = await adapter.getPositions();
+      }
       const openOrders = await adapter.getOrders().catch(() => []);
       const balances = await adapter.getBalance().catch(() => []);
       const cancelOpenOrders = async (prefix: string): Promise<string[]> => {
