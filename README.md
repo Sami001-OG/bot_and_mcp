@@ -13,6 +13,7 @@ A single Next.js live-trading application (Vercel-deployable) that receives **Tr
 - [2. Exchange APIs (required first step)](#2-exchange-apis-required-first-step)
 - [3. Bots](#3-bots)
 - [4. TradingView webhooks](#4-tradingview-webhooks)
+- [Webhook integration guide — building a signal-generator app on top of BOTX](#4b-webhook-integration-guide--building-a-signal-generator-app-on-top-of-botx)
 - [5. Orders page (manual control)](#5-orders-page-manual-control)
 - [6. Dashboard](#6-dashboard)
 - [7. Settings and risk controls](#7-settings-and-risk-controls)
@@ -409,14 +410,369 @@ If `WEBHOOK_REQUIRE_SIGNATURE=false`, unsigned requests are accepted (do not do 
 
 ### Responses
 
-| Status | Meaning |
-|---|---|
-| `202` | Accepted. Body: `{ deliveryId, routed, failed, bots: [...] }`. `routed` = bots that processed it, `failed` = bot runs that errored, `deliveryId` = the persisted `WebhookDelivery` (view deliveries on the Bots page). Each `bots[]` entry: `{ botId, runId, status, orders, skipped, notes, price, positionSide, managed? }` — `managed` is present when the run executed a DCA/breakeven/partial-TP pass (always for `MANAGE`). A `note` field may explain degenerate cases: `LIVE_TRADING_DISABLED` (trading toggle off — `failed: 1`) or `no ACTIVE bot for this endpoint`. |
-| `401` | Missing/invalid signature, stale timestamp, or replayed nonce (`WEBHOOK_VERIFICATION_FAILED`). |
-| `404` / `410` | Unknown endpoint / endpoint deactivated (endpoints are deactivated when their bot is paused/stopped). |
-| `4xx/5xx` | Schema or processing errors. |
+The endpoint **acknowledges immediately** and executes asynchronously:
 
-Verification order: signature (HMAC over raw body) → schema parse → timestamp tolerance (±5 min) → nonce replay claim (`<exchange>:<nonce>`, persisted on the endpoint row for 5 minutes).
+| Status | Body | Meaning |
+|---|---|---|
+| `202` | `{ "deliveryId": "...", "status": "ACCEPTED" }` | Signature valid, payload schema-valid, nonce claimed. The signal is now queued for execution (`WebhookDelivery` row created with status `PROCESSING`). **The HTTP response does not contain execution results** — orders are placed after the ack via a background task. |
+| `401` | `{ message, code: 'WEBHOOK_VERIFICATION_FAILED' }` | Bad HMAC signature, timestamp outside ±5 min, or replayed nonce. |
+| `404` | — | Unknown `endpointId`. |
+| `410` | — | Endpoint deactivated (its bot is paused/stopped/deleted). |
+| `4xx/5xx` | `{ message, code?, statusCode? }` | Schema validation or processing errors (schema errors carry Zod issue details in `message`). |
+
+Execution outcomes are persisted, not returned: the delivery row becomes `DELIVERED` (all bot runs OK) or `FAILED` (with error), and each bot run records its own metrics (orders placed, skipped reasons, price, management summary). Inspect them on the Bots page (runs timeline + deliveries) or in notifications. A signal-generator that needs programmatic confirmation of fills should read positions/orders through the bot's MCP server (see [section 8](#8-mcp-server-ai-agent-access)) — see [Result feedback loop](#result-feedback-loop-for-your-app).
+
+Verification order: endpoint lookup → active check → HMAC signature over raw body → JSON parse + signal schema → timestamp tolerance (±5 min, UTC `Z`) → nonce replay claim (`<exchange>:<nonce>`, stored 5 minutes).
+
+## 4b. Webhook integration guide — building a signal-generator app on top of BOTX
+
+This section is a **complete implementation specification** for any external app (or AI agent writing one) that wants to emit trades into BOTX over webhooks. It explains the whole contract — transport, authentication, payload schema, market-type routing, replay/retry semantics, response handling, and reference sender implementations in Node.js and Python. Follow it exactly and your app can drive BOTX bots (and through them Bybit spot + USDT futures) with signed signals.
+
+### How the pieces fit
+
+```text
+┌──────────────────────┐   HTTPS POST + HMAC     ┌─────────────────────────────────────────┐
+│ Your signal app      │ ───────────────────────▶ │ BOTX  /api/webhooks/tradingview/<id>    │
+│ (strategy, ML, TV,   │   x-tradingview-signature │ 1. verify signature/timestamp/nonce     │
+│  scheduler, agent)   │ ◀─────────────────────── │ 2. validate payload against schema      │
+└──────────────────────┘   202 {deliveryId}      │ 3. persist WebhookDelivery              │
+                                                 │ 4. (async) route to the owning bot      │
+                                                 │    → risk engine → sized orders         │
+                                                 │    → Bybit spot / USDT futures          │
+                                                 └─────────────────────────────────────────┘
+```
+
+Key mental model:
+
+- You never talk to an exchange. You emit **signals**; the BOTX **bot** owns the exchange API, sizing, leverage, brackets, risk limits, and position management.
+- Each bot has **exactly one** webhook endpoint and **exactly one** signing secret. A signal sent to that endpoint can only ever trigger that bot.
+- The bot's permanent config (market type, symbols, capital-per-trade allocation, leverage, SL/TP, DCA/breakeven/partial-TP) is set once at creation; your signals select *what* to do (action + symbol), while the bot governs *how much* and *how* — unless you pass ephemeral overrides.
+
+### Step 0 — provision a bot and store its credentials
+
+Before your app can send anything, a bot must exist. Create it once (human step, or automate via REST/MCP):
+
+- **UI**: Bots page → New bot → pick **Spot** or **Futures**, choose capital-per-trade mode (fixed $ / % equity / % peak equity / risk %), leverage (futures only), symbols → create.
+- **REST** (session cookie): `POST /api/bots` with `{ name, exchangeAccountId, password?, config }`.
+- **MCP**: `createBot` tool (same fields).
+
+The creation response contains everything your app needs — capture and store all three values:
+
+```json
+{
+  "bot":  { "id": "<botId>", "name": "btc-breakout", "...": "..." },
+  "webhook": {
+    "id": "<endpointId>",
+    "url": "https://<host>/api/webhooks/tradingview/<endpointId>",
+    "signingSecret": "<64+ char random string>"
+  },
+  "mcp": {
+    "url": "https://<host>/api/mcp/bots/<botId>",
+    "password": "<same as signingSecret>"
+  }
+}
+```
+
+> [!WARNING]
+> `signingSecret` is shown **exactly once** and cannot be retrieved later. If lost, delete and recreate the bot. Treat it like an API key: it authorizes trades.
+
+Config notes relevant to senders:
+
+- `config.marketType` is `"SPOT"` or `"USDT_FUTURES"` (default `"USDT_FUTURES"`). It decides how your `symbol` is interpreted (see [Symbol routing](#symbol-routing-and-market-types)) and whether leverage applies.
+- If `config.allocation` is set (any mode other than "use signal size"), the bot **ignores your `size`** and sizes from its own capital-per-trade rule. Send `size` anyway — it is schema-required for non-MANAGE actions and serves as a fallback.
+- `config.actions` (if configured) allowlists actions; anything else is skipped with a recorded reason.
+
+### Transport contract
+
+| Item | Value |
+|---|---|
+| Method | `POST` |
+| URL | `<origin>/api/webhooks/tradingview/<endpointId>` |
+| Content-Type | `application/json` |
+| Auth header | `x-tradingview-signature: <lowercase hex hmac>` |
+| Body | The exact JSON string you signed (UTF-8, byte-identical) |
+| Timeout guidance | Ack typically returns in < 1 s; give the HTTP call ≥ 10 s |
+| Health probe | `GET` on the same URL returns `{ ok: true, ts }` (unsigned, harmless) |
+
+The signature is computed over the **raw bytes of the body** — not a re-serialization. So: build the object → `JSON.stringify` once → sign that exact string → send that exact string. Do not pretty-print, do not let an HTTP library re-encode what you signed.
+
+#### Signing algorithm
+
+```
+signature = lowercase_hex( HMAC_SHA256( key = signingSecret, message = raw_body_utf8_bytes ) )
+header    = x-tradingview-signature: <signature>
+```
+
+Node.js:
+
+```js
+import { createHmac } from 'node:crypto';
+
+const body = JSON.stringify(signal);                       // stringify ONCE
+const signature = createHmac('sha256', signingSecret)      // key = the bot's signing secret
+  .update(body, 'utf8')                                    // message = the exact string you send
+  .digest('hex');                                          // lowercase hex
+// headers: { 'content-type': 'application/json', 'x-tradingview-signature': signature }
+```
+
+Python:
+
+```python
+import json, hmac, hashlib
+
+body = json.dumps(signal, separators=(",", ":"), ensure_ascii=False)  # one canonical string
+signature = hmac.new(signing_secret.encode(), body.encode("utf-8"), hashlib.sha256).hexdigest()
+# headers: {"Content-Type": "application/json", "x-tradingview-signature": signature}
+```
+
+PowerShell (quick manual tests):
+
+```powershell
+$body  = '{"exchange":"bybit","symbol":"BTC/USDT","action":"BUY","size":"0.001","timestamp":"2026-08-21T12:00:00.000Z","nonce":"test-nonce-0001"}'
+$hmac  = [System.Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($secret))
+$sig   = ($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($body)) | ForEach-Object { $_.ToString('x2') }) -join ''
+Invoke-RestMethod -Method Post -Uri "$host/api/webhooks/tradingview/$endpointId" -Headers @{ 'x-tradingview-signature' = $sig } -ContentType 'application/json' -Body $body
+```
+
+Any language with HMAC-SHA256 works — the contract is deliberately minimal so TradingView's plain webhook (which cannot compute signatures) is supported by setting `WEBHOOK_REQUIRE_SIGNATURE=false`; **never do this on a publicly reachable deployment**.
+
+### Signal schema (authoritative field reference)
+
+The body is a single JSON object. Unknown fields are ignored; listed constraints are enforced server-side (violations → `4xx` with a descriptive message).
+
+| Field | Type | Required | Constraints / notes |
+|---|---|---|---|
+| `exchange` | string | yes | Must be `"bybit"` (the bot's account exchange must match too, else the run skips). |
+| `symbol` | string | yes | 3–40 chars, case-insensitive (uppercased server-side). Bare (`BTC/USDT`) or futures (`BTC/USDT:USDT`) form accepted; routed per the bot's market type — see [Symbol routing](#symbol-routing-and-market-types). |
+| `action` | string | yes | One of `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`, `MANAGE` (also schema-valid but bot-ignored unless allowlisted: `SET_LEVERAGE`, `MOVE_STOP`). |
+| `size` | **string** | yes* | **Decimal string**, e.g. `"0.01"`. A JSON number (`0.01`) is **rejected**. Base-asset quantity. Required for every action **except** `MANAGE`; forbidden **with** `MANAGE`. Ignored when the bot has an allocation mode. |
+| `timestamp` | **string** | yes | **ISO-8601 UTC string ending in `Z`**, e.g. `"2026-08-21T12:00:00.000Z"`. Must be within **±5 minutes** of server time. Not epoch seconds. |
+| `nonce` | string | yes | 12–128 chars. Must be **unique per endpoint within 5 minutes** (replay window). Reusing one → `401 WEBHOOK_VERIFICATION_FAILED`. |
+| `leverage` | number | no | Integer 1–200. Futures entries only; the bot's saved leverage wins if it sets one. |
+| `stop_loss` | string | no | Decimal-string price. Attaches a reduce-only stop-market bracket to the entry. |
+| `take_profit` | string[] | no | Up to 20 decimal-string prices; each becomes a reduce-only TP bracket order splitting the entry quantity evenly. |
+| `reduce_only` | boolean | no | Default `false`. Meaningful only for manual-style flows; CLOSE/PARTIAL_EXIT orders are always reduce-only regardless. |
+| `close_percentage` | number | no | 0 < x ≤ 100. Used by `PARTIAL_EXIT` (default 100). |
+| `trailing` | object | no | `{ callbackPercent: 0.01–10, enabled?: bool }` — attaches a trailing-stop order to **this run's entry** (futures bots; skipped with a note on spot bots). Overrides the bot's saved trailing config for this run only. |
+| `dca` | object | no | Ephemeral DCA override — see below. |
+| `breakeven` | object | no | Ephemeral breakeven override — see below. |
+| `partialTps` | object | no | Ephemeral partial-TP override — see below. |
+
+\* `size` super-rule: present on trade actions, absent on `MANAGE`.
+
+#### Ephemeral overrides (per-run config)
+
+All three override objects **replace the bot's saved capability config for this single run** and enable it unless `"enabled": false` is explicit. Nothing is persisted.
+
+```jsonc
+"dca": {
+  "triggerDropPercent": 4,        // >0, ≤50 — fire step 1 when price is 4% below entry
+  "stepDropPercent": 4,           // optional, ≤50 — spacing for steps 2+
+  "amountMode": "FIXED",          // "FIXED" | "PERCENT_EQUITY"
+  "amount": 50,                   // >0 — USD (FIXED) or percent (PERCENT_EQUITY)
+  "maxSteps": 3                   // 1–20
+},
+"breakeven": {
+  "moveAtProfitPercent": 1.5,     // >0, ≤100 — move SL at +1.5% in favor
+  "safeProfitPercent": 0.2        // optional — lock +0.2% instead of exact breakeven
+},
+"partialTps": {
+  "enabled": true,
+  "levels": [                     // 1–10 levels; closePercent must sum ≤ 100
+    { "pricePercent": 3, "closePercent": 25 },
+    { "pricePercent": 8, "closePercent": 50 }
+  ]
+},
+"trailing": { "callbackPercent": 2 }   // entry-bracket override, NOT a management-pass input
+```
+
+### Actions — exact semantics
+
+| Action | `size` | Needs existing position? | What the bot does |
+|---|---|---|---|
+| `BUY` / `LONG` | yes | no | Market buy entry (+ SL/TP/trailing brackets per config/signal). |
+| `SELL` / `SHORT` | yes | no | Market sell/short entry (+ brackets). Spot `SELL` entries require base balance. |
+| `CLOSE_LONG` | yes* | effectively yes | Reduce-only market sell. Quantity: real position qty (futures) / free base balance (spot) when known, else your `size`. |
+| `CLOSE_SHORT` | yes* | effectively yes | Reduce-only market buy to flatten a short (futures). |
+| `PARTIAL_EXIT` | yes | yes | Closes `close_percentage`% (default 100) of the live position at market. Skipped if the bot has no readable position state. |
+| `REVERSE` | yes | yes | Close current side, then open the opposite side with full bracket logic. Skipped when flat. |
+| `MANAGE` | **no** (forbidden) | no | Runs only the management pass (DCA steps, breakeven SL move, partial-TP claims) using saved config + any overrides. No entry/exit orders. Ideal as a periodic "tick" from schedulers. |
+| `SET_LEVERAGE`, `MOVE_STOP` | — | — | Schema-valid but inert unless the bot allowlists them; prefer the MCP tools for these. |
+
+\* For CLOSE actions supply your best-known quantity (or `"0"`-style placeholder is **not** valid — `size` must be a positive decimal string; use the actual amount you want as fallback). The bot substitutes the real exchange-side quantity whenever it can read one, so a slightly-stale `size` is safe.
+
+### Symbol routing and market types
+
+Bots are **market-typed**. Your symbol is normalized to the bot's market before anything executes — send whichever form is convenient:
+
+| Bot market type | You send | Executes as | Note |
+|---|---|---|---|
+| `SPOT` | `BTC/USDT` | `BTC/USDT` | canonical spot form |
+| `SPOT` | `BTC/USDT:USDT` | `BTC/USDT` | colon stripped automatically |
+| `USDT_FUTURES` | `BTC/USDT` | `BTC/USDT:USDT` | colon appended automatically |
+| `USDT_FUTURES` | `BTC/USDT:USDT` | `BTC/USDT:USDT` | canonical futures form |
+| `USDT_FUTURES` | `SOL/USDT:SOL` | `SOL/USDT:USDT` | settle coerced to USDT (linear) |
+| either | symbol not in bot's configured list | — | fast-skipped, zero exchange calls |
+| `USDT_FUTURES` | `BTC/USD` (non-USDT quote) | **rejected** | futures bots trade USDT-quoted pairs only |
+
+Routing happens **before** any network I/O: a mismatched symbol/action/exchange is answered with the normal `202` and recorded as a skipped reason on the bot run — cheap for both sides. Spot bots have no leverage and no trailing stops (requested trailing is skipped with a note); spot CLOSE/PARTIAL_EXIT operate on free base balance.
+
+### Nonce, timestamp, retries — read this before wiring retries
+
+The anti-replay design has direct consequences for your retry logic:
+
+1. **Every accepted request permanently claims its nonce for 5 minutes** (per endpoint). A retry with the same nonce inside the window gets `401 …replay detected`.
+2. Therefore:
+   - **Transport-level errors** (connection refused/reset, DNS, 5xx before reading a body): the request may or may not have landed. Safe pattern: retry **once** after a short delay **with a fresh nonce and fresh timestamp** ONLY if your strategy tolerates a possible duplicate entry; otherwise don't blind-retry trade signals — send a `MANAGE` tick instead and reconcile via MCP reads.
+   - **`401 replay detected`**: your original request **did arrive** earlier. Treat the trade as submitted; do not resend.
+   - **Timeout after ~10 s with no response**: same as transport error — ambiguous. Prefer reconciliation over duplication.
+3. Generate nonces that are unique under concurrency: `Date.now()` + random suffix, or UUID-with-dashes stripped to ≤128 chars. Minimum 12 chars.
+4. Always regenerate `timestamp` per attempt (clock skew between your server and BOTX eats the ±5-min window silently).
+
+### Result feedback loop for your app
+
+Because execution is asynchronous, the `202` means *"accepted and verified"*, not *"filled"*. Options, best first:
+
+1. **Per-bot MCP reads** (programmatic, recommended): authenticate to `https://<host>/api/mcp/bots/<botId>` with the bot password and call `getPositions` / `getOrders` / `getTradeHistory` / `getPortfolio` to confirm the effect of your signal seconds later.
+2. **BOTX UI/notifications**: Bots page shows every run (orders, skipped reasons, price, managed-summary) and every delivery (`DELIVERED`/`FAILED`).
+3. **Cron-managed autonomy**: you don't need to poll at all — schedule periodic `MANAGE` ticks (e.g. every 1–5 min) and let BOTX's engine handle DCA/breakeven/partial-TP reactions between your signals.
+
+### Reference sender — Node.js (drop-in)
+
+```js
+// botx-signal-client.mjs — zero dependencies (Node 18+ built-in fetch)
+import { createHmac, randomBytes } from 'node:crypto';
+
+export class BotxSignals {
+  /**
+   * @param {{ host: string, endpointId: string, signingSecret: string }} opts
+   * host e.g. 'https://web-blue-delta-17.vercel.app' (no trailing slash)
+   */
+  constructor(opts) {
+    this.host = opts.host.replace(/\/+$/, '');
+    this.endpointId = opts.endpointId;
+    this.signingSecret = opts.signingSecret;
+  }
+
+  static newNonce() {
+    return `${Date.now().toString(36)}${randomBytes(6).toString('hex')}`; // ~20 chars, unique
+  }
+
+  sign(body) {
+    return createHmac('sha256', this.signingSecret).update(body, 'utf8').digest('hex');
+  }
+
+  /**
+   * Send one signal. Returns { ok, status, deliveryId?, error? }.
+   * Throws only on unreachable host; HTTP errors are returned, not thrown.
+   */
+  async send(signal) {
+    const body = JSON.stringify({
+      exchange: 'bybit',
+      timestamp: new Date().toISOString(),       // UTC 'Z' ISO string, regenerated per attempt
+      nonce: BotxSignals.newNonce(),
+      ...signal,
+    });
+    const res = await fetch(`${this.host}/api/webhooks/tradingview/${this.endpointId}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-tradingview-signature': this.sign(body) },
+      body,                                       // the exact string we signed
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 202) return { ok: true, status: 202, deliveryId: data.deliveryId };
+    if (res.status === 401 && /replay/i.test(String(data.message))) {
+      return { ok: true, status: 401, deduplicated: true, error: data.message }; // already accepted earlier
+    }
+    return { ok: false, status: res.status, error: data.message ?? 'rejected' };
+  }
+
+  // Convenience wrappers -------------------------------------------------
+  enter(symbol, side, size, extra = {}) {
+    const action = { long: 'LONG', longBuy: 'BUY', short: 'SHORT', shortSell: 'SELL' }[side] ?? side;
+    return this.send({ symbol, action, size: String(size), ...extra });
+  }
+  closeLong(symbol, size)  { return this.send({ symbol, action: 'CLOSE_LONG',  size: String(size) }); }
+  closeShort(symbol, size) { return this.send({ symbol, action: 'CLOSE_SHORT', size: String(size) }); }
+  partialExit(symbol, size, closePercentage) {
+    return this.send({ symbol, action: 'PARTIAL_EXIT', size: String(size), ...(closePercentage ? { close_percentage: closePercentage } : {}) });
+  }
+  reverse(symbol, size, extra = {}) { return this.send({ symbol, action: 'REVERSE', size: String(size), ...extra }); }
+  manageTick(symbol, overrides = {}) { return this.send({ symbol, action: 'MANAGE', ...overrides }); }
+}
+
+// ---- usage ----
+// const botx = new BotxSignals({ host: 'https://<host>', endpointId: process.env.BOTX_ENDPOINT_ID, signingSecret: process.env.BOTX_SIGNING_SECRET });
+// await botx.enter('BTC/USDT', 'LONG', '0.01', { stop_loss: '89000', take_profit: ['100000'], leverage: 5 });
+// setInterval(() => botx.manageTick('BTC/USDT'), 60_000);   // keep the management engine ticking
+```
+
+### Reference sender — Python (stdlib only)
+
+```python
+# botx_signals.py
+import hmac, hashlib, json, time, secrets
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+
+class BotxSignals:
+    def __init__(self, host: str, endpoint_id: str, signing_secret: str):
+        self.host = host.rstrip("/")
+        self.endpoint_id = endpoint_id
+        self.secret = signing_secret.encode()
+
+    def _send(self, signal: dict) -> dict:
+        payload = {"exchange": "bybit", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                   "nonce": f"{int(time.time()*1000):x}{secrets.token_hex(6)}", **signal}
+        body = json.dumps(payload, separators=(",", ":"))          # one canonical string
+        sig = hmac.new(self.secret, body.encode("utf-8"), hashlib.sha256).hexdigest()
+        req = Request(f"{self.host}/api/webhooks/tradingview/{self.endpoint_id}", data=body.encode("utf-8"),
+                      headers={"Content-Type": "application/json", "x-tradingview-signature": sig}, method="POST")
+        try:
+            with urlopen(req, timeout=15) as resp:
+                return {"ok": True, "status": resp.status, **json.loads(resp.read())}
+        except HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            dedup = (e.code == 401 and "replay" in detail.lower())
+            return {"ok": dedup, "deduplicated": dedup, "status": e.code, "error": detail}
+
+    def enter(self, symbol, side, size, **extra):   # side: LONG SHORT BUY SELL
+        return self._send({"symbol": symbol, "action": side, "size": str(size), **extra})
+
+    def close_long(self, symbol, size):   return self._send({"symbol": symbol, "action": "CLOSE_LONG",  "size": str(size)})
+    def close_short(self, symbol, size):  return self._send({"symbol": symbol, "action": "CLOSE_SHORT", "size": str(size)})
+    def partial_exit(self, symbol, size, pct): return self._send({"symbol": symbol, "action": "PARTIAL_EXIT", "size": str(size), "close_percentage": pct})
+    def reverse(self, symbol, size, **extra):  return self._send({"symbol": symbol, "action": "REVERSE", "size": str(size), **extra})
+    def manage_tick(self, symbol, **overrides): return self._send({"symbol": symbol, "action": "MANAGE", **overrides})
+
+# usage:
+# botx = BotxSignals("https://<host>", os.environ["BOTX_ENDPOINT_ID"], os.environ["BOTX_SIGNING_SECRET"])
+# print(botx.enter("BTC/USDT", "LONG", "0.01", stop_loss="89000", take_profit=["100000"], leverage=5))
+```
+
+### Implementation checklist for the integrating agent
+
+1. Store `host`, `endpointId`, `signingSecret` as secrets — never log the secret or the signed body together.
+2. Build signal object → `JSON.stringify`/`json.dumps` **once** → HMAC that exact string → send it unchanged.
+3. Regenerate `timestamp` (UTC ISO `Z`) and `nonce` on **every** attempt.
+4. Handle: `202` (accepted), `401` (bad signature/stale timestamp → fix clock/signing; replay → treat as already-submitted), `404/410` (endpoint gone — alert operator), other `4xx` (your payload is invalid — do not retry verbatim).
+5. Respect the bot's market type when choosing symbol form (either form works; non-USDT quotes fail on futures bots).
+6. Remember `size` is a decimal **string** and is ignored when the bot uses an allocation mode.
+7. Add a periodic `MANAGE` tick (1–5 min) so DCA/breakeven/partial-TP react between signals — this replaces you having to implement exit logic.
+8. Confirm fills via the per-bot MCP server (`getPositions`/`getOrders`/`getTradeHistory`) when your strategy needs closed-loop feedback.
+9. Test end-to-end on a **testnet** exchange account first (create the account with Testnet checked; everything else is identical).
+10. Rate expectations: there is no artificial rate limit, but each trade-action signal triggers synchronous exchange calls; keep signal bursts per bot modest (≤ a few per second) and prefer batching decisions in your app.
+
+### Troubleshooting sender integrations
+
+| Symptom | Cause / fix |
+|---|---|
+| `401 Invalid webhook signature` | Body changed after signing (re-serialization, charset, proxy rewrite). Sign the exact bytes you send. |
+| `401 …timestamp outside tolerance` | Your clock or the timestamp format. Use UTC `…Z` ISO strings; sync NTP; ±5 min window. |
+| `401 …replay detected` | Nonce reused within 5 min — your earlier request arrived. Don't resend; new nonce for new signals. |
+| `422/400` mentioning `size` | `size` sent as JSON number, missing on a trade action, or present on `MANAGE`. Decimal string, correct presence per action. |
+| `202` but no order appeared | Normal paths: symbol/action filtered by bot config, allocation mode overrode size, risk skip (min-notional $10 futures/$5 spot, margin, daily-loss breaker), trading toggle off (`LIVE_TRADING_DISABLED`). Check the bot's run reasons on the Bots page. |
+| `410` | Bot paused/stopped/deleted — endpoint deactivated. Resume the bot or re-provision. |
+
 
 ## 5. Orders page (manual control)
 
