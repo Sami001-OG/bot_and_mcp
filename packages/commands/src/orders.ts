@@ -1,5 +1,5 @@
 import { OrderRequestSchema, type Allocation, type OrderRequest, type ResolvedOrderRequest } from '@platform/contracts';
-import { Prisma, prisma } from '@platform/database';
+import { Prisma } from '@platform/database';
 import { ExchangeError, type MarketPrecision } from '@platform/exchange-core';
 import { evaluateOrder, type RiskContext, type RiskPolicy } from '@platform/risk-engine';
 import { alignAmount, alignPrice, sizeOrder } from '@platform/trading-core';
@@ -113,7 +113,8 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       details: error instanceof ExchangeError ? error.code : error instanceof Error ? error.message : String(error)
     });
   }
-  if (!request.reduceOnly && new Prisma.Decimal(market.equity).lte(0)) {
+  const isSpotSell = request.marketType === 'SPOT' && request.side === 'SELL';
+  if (!request.reduceOnly && !isSpotSell && new Prisma.Decimal(market.equity).lte(0)) {
     const quote = (request.symbol.split('/')[1] ?? 'USDT').split(':')[0] ?? 'USDT';
     throw new CommandError(409, 'INSUFFICIENT_FUNDS', `No funds in the exchange account (${config.label}). Add ${quote} to the account before trading.`);
   }

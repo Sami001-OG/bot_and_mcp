@@ -227,18 +227,37 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
     } else if (order.positionSide === 'LONG' || order.positionSide === 'SHORT') {
       params.positionSide = order.positionSide;
     }
-    try { return await this.executePlacement(order, params); }
+    const effective = this.marketType === 'SPOT' && order.side.toUpperCase() === 'SELL' ? { ...order, quantity: await this.clampSpotSellQuantity(order) } : order;
+    try { return await this.executePlacement(effective, params); }
     catch (error) {
       if (this.id === 'bybit' && isPositionIdxMismatch(error) && this.credentialsKey) {
         positionModeCache.delete(this.credentialsKey);
         delete params.positionIdx;
         delete params.hedged;
-        await this.applyBybitPositionMode(order, params);
-        try { return await this.executePlacement(order, params); }
+        await this.applyBybitPositionMode(effective, params);
+        try { return await this.executePlacement(effective, params); }
         catch (error2) { throw this.normalize(error2); }
       }
       throw this.normalize(error);
     }
+  }
+  private async clampSpotSellQuantity(order: OrderRequest): Promise<string> {
+    const client = this.requireClient();
+    const resolved = this.marketSymbol(order.symbol);
+    const market = (client.markets ?? {})[resolved] as { base?: unknown } | undefined;
+    const base = String(market?.base ?? order.symbol.split('/')[0] ?? '').toUpperCase();
+    const requested = Number(order.quantity);
+    if (!base || !Number.isFinite(requested) || requested <= 0) return order.quantity ?? String(requested);
+    let free = 0;
+    try {
+      const balance = await client.fetchBalance();
+      free = Number((balance as unknown as Record<string, { free?: number } | undefined>)[base]?.free ?? 0);
+    } catch (error) { throw this.normalize(error); }
+    if (!(free > 0)) throw new ExchangeError('INSUFFICIENT_FUNDS', `No free ${base} balance to sell ${order.symbol}`, false);
+    if (requested <= free) return order.quantity ?? String(requested);
+    const aligned = Number(client.amountToPrecision(resolved, free));
+    if (!(aligned > 0)) throw new ExchangeError('INSUFFICIENT_FUNDS', `Free ${base} balance rounds to zero at the amount step for ${order.symbol}`, false);
+    return String(aligned);
   }
   private async executePlacement(order: OrderRequest, params: Record<string, unknown>): Promise<ExchangeOrder> {
     if (order.type === 'TRAILING_STOP') {
@@ -318,10 +337,10 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
         return created;
       }
       params.triggerPrice = order.stopPrice;
-      if (this.id === 'bybit') params.triggerDirection = order.side.toLowerCase() === 'buy' ? 'ascending' : 'descending';
+      if (this.id === 'bybit' && this.marketType !== 'SPOT') params.triggerDirection = order.side.toLowerCase() === 'buy' ? 'ascending' : 'descending';
     }
     if (order.callbackRate) params.callbackRate = order.callbackRate;
-    return this.mapOrder(await this.requireClient().createOrder(this.marketSymbol(order.symbol), this.mapType(order.type), order.side.toLowerCase(), Number(order.quantity), order.price ? Number(order.price) : undefined, params));
+    return this.mapOrder(await this.requireClient().createOrder(this.marketSymbol(order.symbol), this.createOrderType(order.type), order.side.toLowerCase(), Number(order.quantity), order.price ? Number(order.price) : undefined, params));
   }
   private async applyBybitPositionMode(order: OrderRequest, params: Record<string, unknown>): Promise<void> {
     if ((await this.bybitPositionMode(order.symbol)) !== 'hedged') return;
@@ -402,6 +421,17 @@ export class CcxtExchangeAdapter implements ExchangeAdapter {
   public resolveMarketSymbol(symbol: string): string { return this.marketSymbol(symbol); }
   private bareSymbol(symbol: string): string { return bareSymbol(symbol); }
   private mapType(type: OrderRequest['type']): string { return ({ MARKET: 'market', LIMIT: 'limit', STOP: 'stop', STOP_MARKET: 'stop_market', STOP_LIMIT: 'stop_limit', TAKE_PROFIT: 'take_profit', TAKE_PROFIT_MARKET: 'take_profit_market', TRAILING_STOP: 'trailing_stop_market' } as const)[type]; }
+  private createOrderType(type: OrderRequest['type']): string {
+    if (this.marketType !== 'SPOT') return this.mapType(type);
+    switch (type) {
+      case 'LIMIT':
+      case 'STOP_LIMIT':
+      case 'TAKE_PROFIT':
+        return 'limit';
+      default:
+        return 'market';
+    }
+  }
   private mapOrder(order: { id?: unknown; clientOrderId?: unknown; symbol?: unknown; status?: unknown; side?: unknown; type?: unknown; amount?: unknown; filled?: unknown; average?: unknown; fee?: ({ cost?: unknown | undefined; currency?: unknown | undefined } | undefined); lastTradeTimestamp?: unknown; timestamp?: unknown }): ExchangeOrder { const updatedTimestamp = typeof order.lastTradeTimestamp === 'number' ? order.lastTradeTimestamp : typeof order.timestamp === 'number' ? order.timestamp : Date.now(); return { id: String(order.id), clientOrderId: String(order.clientOrderId ?? order.id), symbol: this.bareSymbol(String(order.symbol)), status: this.mapStatus(String(order.status ?? 'unknown')), side: String(order.side).toUpperCase() as 'BUY'|'SELL', type: String(order.type), quantity: String(order.amount ?? 0), filledQuantity: String(order.filled ?? 0), ...(order.average == null ? {} : { averagePrice: String(order.average) }), ...(order.fee && order.fee.cost != null && Number(order.fee.cost) !== 0 ? { fee: { cost: String(order.fee.cost), asset: String(order.fee.currency ?? '') } } : {}), rawStatus: String(order.status ?? 'unknown'), updatedAt: new Date(updatedTimestamp).toISOString() }; }
   private mapStatus(status: string): ExchangeOrder['status'] { return mapExchangeStatus(status); }
   private normalize(error: unknown): ExchangeError { if (error instanceof ExchangeError) return error; const message = error instanceof Error ? error.message : 'Unknown exchange error'; const retryable = error instanceof ccxt.NetworkError || error instanceof ccxt.RateLimitExceeded; const ambiguous = error instanceof ccxt.RequestTimeout; return new ExchangeError(error instanceof Error ? error.name : 'EXCHANGE_ERROR', message, retryable, ambiguous); }

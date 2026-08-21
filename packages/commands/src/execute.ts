@@ -1,6 +1,6 @@
 import { prisma, Prisma, type OrderIntent } from '@platform/database';
 import { ExchangeError, type ExchangeAdapter, type ExchangeOrder } from '@platform/exchange-core';
-import { OrderRequestSchema, type Allocation, type ResolvedOrderRequest } from '@platform/contracts';
+import { OrderRequestSchema, type Allocation, type MarketType, type ResolvedOrderRequest } from '@platform/contracts';
 import { sizeOrder, applyFill, alignAmount, alignPrice, type PositionSnapshot } from '@platform/trading-core';
 import { connectToAccount, getAccountConfig, marketPrecisionOf, type AccountConfig } from './account.js';
 import { getSettings } from './settings.js';
@@ -136,8 +136,9 @@ export async function executeOrderNow(orderId: string, ctx?: ExecuteContext): Pr
         ownsAdapter = true;
       }
       if (order.exchangeOrderId) {
-        const result = await reconcileOrder(adapter, order);
-        return { orderId, state: order.state, exchangeOrderId: order.exchangeOrderId, filled: Number(await filledQuantityOf(orderId)) };
+        await reconcileOrder(adapter, order);
+        const refreshed = await prisma.orderIntent.findUniqueOrThrow({ where: { id: orderId }, select: { state: true } });
+        return { orderId, state: refreshed.state, exchangeOrderId: order.exchangeOrderId, filled: Number(await filledQuantityOf(orderId)) };
       }
       if (order.state === 'SUBMITTING') {
         const recovered = await recoverOrderByClientOrderId(adapter, order);
@@ -269,7 +270,7 @@ export async function cancelOrderNow(orderId: string): Promise<{ orderId: string
   if ((TERMINAL_STATES as readonly string[]).includes(order.state)) return { orderId, state: order.state };
   let adapter: ExchangeAdapter | undefined;
   try {
-    const session = await connectToAccount(order.exchangeAccountId ?? undefined);
+    const session = await connectToAccount(order.exchangeAccountId ?? undefined, (order.marketType ?? undefined) as MarketType | undefined);
     adapter = session.adapter;
     if (!order.exchangeOrderId) throw new ExchangeError('NOT_ON_EXCHANGE', 'Order has no exchange order id', false);
     const result = await adapter.cancelOrder(order.exchangeOrderId, order.symbol);
@@ -335,7 +336,7 @@ export async function resyncOrderNow(orderId: string): Promise<Record<string, un
   if ((['FILLED', 'CANCELED', 'REJECTED'] as string[]).includes(order.state)) return { orderId, status: order.state, changed: false };
   let adapter: ExchangeAdapter | undefined;
   try {
-    const session = await connectToAccount(order.exchangeAccountId ?? undefined);
+    const session = await connectToAccount(order.exchangeAccountId ?? undefined, (order.marketType ?? undefined) as MarketType | undefined);
     adapter = session.adapter;
     if (order.exchangeOrderId) {
       const result = await reconcileOrder(adapter, order);

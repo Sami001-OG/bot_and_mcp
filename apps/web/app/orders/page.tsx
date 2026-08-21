@@ -77,9 +77,16 @@ function OrdersBody() {
   }, [loadMarkets, loadSpotBalances, loadOrders]);
 
   useEffect(() => {
-    const timer = setInterval(() => void loadOrders(true), 15000);
+    const timer = setInterval(() => {
+      void loadOrders(true);
+      void loadSpotBalances();
+    }, 15000);
     return () => clearInterval(timer);
-  }, [loadOrders]);
+  }, [loadOrders, loadSpotBalances]);
+
+  const reloadAfterTrade = useCallback(async () => {
+    await Promise.all([loadOrders(), loadSpotBalances()]);
+  }, [loadOrders, loadSpotBalances]);
 
   const cancelOrder = async (order: OrderRow) => {
     try {
@@ -130,7 +137,7 @@ function OrdersBody() {
 
       {tab === 'trade' ? (
         <div className="orders-layout">
-          <OrderForm markets={markets} onOrderPlaced={loadOrders} spotBalances={spotBalances} spotBalancesError={spotBalancesError} />
+          <OrderForm markets={markets} onOrderPlaced={reloadAfterTrade} spotBalances={spotBalances} spotBalancesError={spotBalancesError} />
           <Card>
             <OrderBookTable loading={loadingOrders} onCancel={(order) => void cancelOrder(order)} orders={orders} />
           </Card>
