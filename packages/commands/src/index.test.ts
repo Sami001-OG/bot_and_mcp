@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BreakevenConfigSchema, DcaConfigSchema, PartialTpsConfigSchema, TradingViewSignalSchema, WebhookBotConfigSchema, marketTypeForSymbol, normalizeSymbolForMarket, type MarketType } from '@platform/contracts';
-import { CommandError, breakevenTarget, buildRiskContext, dcaStepDue, managePrefix, mergeManagementOverrides, parseOrderBody, type AccountConfig } from './index.js';
+import { CommandError, breakevenTarget, buildRiskContext, dcaStepDue, managePrefix, mergeManagementOverrides, resolveManagementConfig, parseOrderBody, type AccountConfig } from './index.js';
 
 const testConfig: AccountConfig = { id: 'acc-1', exchange: 'bybit', marketType: 'SPOT', label: 'test', apiKey: 'k', secret: 's' };
 
@@ -141,6 +141,29 @@ describe('commands', () => {
     const merged = mergeManagementOverrides(base, undefined);
     expect(merged).toBe(base);
     expect(merged.dca?.enabled).toBe(true);
+  });
+
+  it('applies built-in management defaults when the bot config omits them', () => {
+    const resolved = resolveManagementConfig(WebhookBotConfigSchema.parse({ symbols: ['BTC/USDT:USDT'] }));
+    expect(resolved.dca).toEqual({ enabled: true, triggerDropPercent: 3, amountMode: 'FIXED', amount: 25, maxSteps: 3 });
+    expect(resolved.breakeven).toEqual({ enabled: true, moveAtProfitPercent: 1.5 });
+    expect(resolved.partialTps?.levels).toHaveLength(3);
+    expect(resolved.partialTps?.levels.reduce((sum, level) => sum + level.closePercent, 0)).toBe(100);
+  });
+
+  it('keeps explicit config and explicit disables over the defaults', () => {
+    const custom = resolveManagementConfig(WebhookBotConfigSchema.parse({
+      symbols: ['BTC/USDT:USDT'],
+      dca: { enabled: false, triggerDropPercent: 5, amountMode: 'PERCENT_EQUITY', amount: 10, maxSteps: 2 },
+      breakeven: { enabled: true, moveAtProfitPercent: 2, safeProfitPercent: 0.5 },
+    }));
+    expect(custom.dca?.enabled).toBe(false);
+    expect(custom.breakeven?.safeProfitPercent).toBe(0.5);
+    const overridden = mergeManagementOverrides(resolveManagementConfig(WebhookBotConfigSchema.parse({ symbols: ['BTC/USDT:USDT'] })), {
+      partialTps: { levels: [{ pricePercent: 1, closePercent: 50 }] },
+    });
+    expect(overridden.partialTps?.levels).toHaveLength(1);
+    expect(overridden.dca?.enabled).toBe(true);
   });
 
   it('respects an explicit enabled:false override', () => {

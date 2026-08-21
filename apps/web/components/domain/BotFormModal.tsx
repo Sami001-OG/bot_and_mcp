@@ -202,7 +202,7 @@ export function BotFormModal({
 
         <fieldset className="action-field">
           <legend>DCA — average down</legend>
-          <label className="checkbox"><input defaultChecked={prefill?.dca?.enabled ?? false} name="dcaEnabled" type="checkbox" /> Automatically add to a losing position</label>
+          <label className="checkbox"><input defaultChecked={prefill?.dca?.enabled ?? false} name="dcaEnabled" type="checkbox" /> Customize DCA (unchecked = built-in default: 3% trigger, $25 steps, max 3)</label>
           <div className="form-row">
             <label>Trigger drop %<input defaultValue={prefill?.dca?.triggerDropPercent ?? 3} min="0.1" name="dcaTriggerDropPercent" step="any" type="number" /></label>
             <label>Step drop % (optional)<input defaultValue={prefill?.dca?.stepDropPercent ?? ''} min="0.1" name="dcaStepDropPercent" step="any" type="number" /></label>
@@ -217,7 +217,7 @@ export function BotFormModal({
 
         <fieldset className="action-field">
           <legend>Breakeven stop-loss move</legend>
-          <label className="checkbox"><input defaultChecked={prefill?.breakeven?.enabled ?? false} name="breakevenEnabled" type="checkbox" /> Move the stop loss to breakeven when in profit</label>
+          <label className="checkbox"><input defaultChecked={prefill?.breakeven?.enabled ?? false} name="breakevenEnabled" type="checkbox" /> Customize breakeven (unchecked = built-in default: move SL at +1.5%)</label>
           <div className="form-row">
             <label>Move at profit %<input defaultValue={prefill?.breakeven?.moveAtProfitPercent ?? 2} min="0.1" name="breakevenMoveAtProfitPercent" step="any" type="number" /></label>
             <label>Safe profit % (optional)<input defaultValue={prefill?.breakeven?.safeProfitPercent ?? ''} min="0.01" name="breakevenSafeProfitPercent" step="any" type="number" /></label>
@@ -227,7 +227,7 @@ export function BotFormModal({
 
         <fieldset className="action-field">
           <legend>Partial take-profit claims</legend>
-          <label className="checkbox"><input defaultChecked={prefill?.partialTps?.enabled ?? false} name="partialTpsEnabled" type="checkbox" /> Claim a percentage of the position at each TP level</label>
+          <label className="checkbox"><input defaultChecked={prefill?.partialTps?.enabled ?? false} name="partialTpsEnabled" type="checkbox" /> Customize partial TPs (unchecked = built-in default: 30% @ +2%, 30% @ +4%, 40% @ +8%)</label>
           <label>TP levels (price% : close%)<input defaultValue={prefill?.partialTps?.levels.map((level) => `${level.pricePercent}:${level.closePercent}`).join(', ') ?? ''} name="partialTpLevels" placeholder="2:30, 5:30, 10:40" type="text" /></label>
           <p className="muted small">Comma separated, e.g. <code>2:30, 5:40, 10:30</code> closes 30% at +2%, 40% at +5%, 30% at +10%. Levels must sum to 100% or less.</p>
         </fieldset>

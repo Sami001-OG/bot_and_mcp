@@ -136,9 +136,31 @@ export function mergeManagementOverrides(config: WebhookBotConfig, overrides: Ma
   return merged;
 }
 
+export const DEFAULT_MANAGEMENT_CONFIG = {
+  dca: { enabled: true, triggerDropPercent: 3, amountMode: 'FIXED' as const, amount: 25, maxSteps: 3 },
+  breakeven: { enabled: true, moveAtProfitPercent: 1.5 },
+  partialTps: {
+    enabled: true,
+    levels: [
+      { pricePercent: 2, closePercent: 30 },
+      { pricePercent: 4, closePercent: 30 },
+      { pricePercent: 8, closePercent: 40 },
+    ],
+  },
+};
+
+export function resolveManagementConfig(config: WebhookBotConfig): WebhookBotConfig {
+  return {
+    ...config,
+    dca: config.dca ?? DEFAULT_MANAGEMENT_CONFIG.dca,
+    breakeven: config.breakeven ?? DEFAULT_MANAGEMENT_CONFIG.breakeven,
+    partialTps: config.partialTps ?? DEFAULT_MANAGEMENT_CONFIG.partialTps,
+  };
+}
+
 export async function manageBotPositions(botId: string, overrides?: ManagementOverrides, session?: ManageSession): Promise<ManageResult> {
   const ctx = session?.botConfig && session.config ? { config: session.botConfig, account: session.config } : await getBotTradeContext(botId);
-  ctx.config = mergeManagementOverrides(ctx.config, overrides);
+  ctx.config = mergeManagementOverrides(resolveManagementConfig(ctx.config), overrides);
   const result: ManageResult = { botId, positions: 0, dca: null, breakeven: null, tps: null, errors: [] };
   const dcaCfg = ctx.config.dca && ctx.config.dca.enabled ? ctx.config.dca : undefined;
   const brCfg = ctx.config.breakeven && ctx.config.breakeven.enabled ? ctx.config.breakeven : undefined;

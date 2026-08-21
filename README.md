@@ -104,6 +104,8 @@ Go to **Bots** (`/bots`):
   - **Require stop loss before entering** — when checked, signals without a `stop_loss` are skipped.
   - **Allowed signal actions** — checkbox allowlist: `BUY`, `SELL`, `LONG`, `SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE`, `PARTIAL_EXIT`. Signals with other actions are ignored.
   - **Position-management capabilities** (evaluated on every bot run, and on demand via the MCP `manageBot` tool, or triggered by the webhook `MANAGE` action; all three work on **both futures and spot** bots — spot positions are tracked via the fill ledger with weighted-average entry prices):
+    - > [!TIP]
+      > **Built-in defaults — zero configuration required.** Every bot can DCA, move its stop to breakeven and claim partial take-profits out of the box, even if you never touch these settings. Defaults: **DCA** 3% trigger, $25 fixed steps, max 3 · **Breakeven** move SL at +1.5% · **Partial TPs** close 30% at +2%, 30% at +4%, 40% at +8%. Anything you configure explicitly replaces the default for that capability; set `"enabled": false` (or customize via MCP `updateBotConfig`) to turn one off. Webhook/MCP ephemeral overrides always win for that single run.
     - **DCA — average down**: add to a losing position when price drops `triggerDropPercent`% below entry. `stepDropPercent` (optional) spaces subsequent steps further out; each step adds `amount` (fixed $ or % of equity), up to `maxSteps` steps, one step per run. Example: 3% trigger, $50 steps, 3 max → steps at −3%, −6%, −9%.
     - **Breakeven stop-loss move**: when price moves `moveAtProfitPercent`% in favor, the stop loss is moved to entry (or `safeProfitPercent` above/below entry for longs/shorts if set). One move per position — state is tracked per bot.
     - **Partial take-profit claims**: comma-separated `price%:close%` levels, e.g. `2:30, 5:40, 10:30`. When price reaches a level the bot closes that percentage of the position at market (or rests a reduce-only TP trigger order at the level so the claim happens when price arrives). Levels must sum to ≤ 100%.
@@ -163,7 +165,7 @@ Every signal can carry `dca`, `breakeven`, and/or `partialTps` objects. When pre
 
 #### MANAGE action
 
-A `MANAGE` signal runs **only** the position-management pass (DCA steps, breakeven SL move, partial-TP claims) — no orders are built or placed, `size` must be omitted, and it does not need to match `config.actions`. The management engine evaluates all open positions on the bot's symbols against the (possibly overridden) config. This is the perfect "tick" for an external app: send a `MANAGE` alert every N minutes to let the engine react to the market even when your strategy is not emitting trade signals.
+A `MANAGE` signal runs **only** the position-management pass (DCA steps, breakeven SL move, partial-TP claims) — no orders are built or placed, `size` must be omitted, and it does not need to match `config.actions`. The management engine evaluates all open positions on the bot's symbols against the (possibly overridden) config — **built-in defaults apply when the bot has none saved**, so a plain `MANAGE` tick works on every bot with zero setup. This is the perfect "tick" for an external app: send a `MANAGE` alert every N minutes to let the engine react to the market even when your strategy is not emitting trade signals.
 
 `MANAGE` respects the circuit breaker and trading toggle like any other run; the run is recorded as a normal `BotRun` with the `managed` metrics attached.
 
@@ -562,7 +564,7 @@ The body is a single JSON object. Unknown fields are ignored; listed constraints
 
 #### Ephemeral overrides (per-run config)
 
-All three override objects **replace the bot's saved capability config for this single run** and enable it unless `"enabled": false` is explicit. Nothing is persisted.
+All three override objects **replace the bot's effective capability config for this single run** — that is the saved config if the bot has one, otherwise the built-in defaults — and enable it unless `"enabled": false` is explicit. Nothing is persisted.
 
 ```jsonc
 "dca": {
@@ -836,7 +838,7 @@ The app exposes MCP servers over Streamable HTTP — point any MCP client at the
   - **Tools**: everything except `listAccounts`, `createBot`, `deleteBot`; trade tools (`placeOrder`, `cancelOrder`, `closePosition`, `closeAll`, `changeLeverage`, `manageBot`) run **only on that bot's account** — no `botId` argument needed.
   - Connect with `npx mcp-remote <origin>/api/mcp/bots/<botId>` and authenticate with the bot password.
 
-### Tools (23)
+### Tools (24)
 
 Read tools:
 
@@ -865,7 +867,8 @@ Write tools (all through the risk engine, synchronous):
 | `closePosition` | Reduce-only market close for a symbol on the bot account |
 | `closeAll` | Close every open position on the bot account |
 | `changeLeverage` | Set leverage for a futures instrument on the bot account |
-| `manageBot` | Run the position-management pass: DCA, breakeven SL move, partial TP claims for the bot's open positions |
+| `manageBot` | Run the position-management pass: DCA, breakeven SL move, partial TP claims for the bot's open positions. Uses the saved config (built-in defaults when unconfigured); optional `dca` / `breakeven` / `partialTps` arguments override for that single run |
+| `updateBotConfig` | Replace a bot's saved config (symbols, marketType, allocation, leverage, SL/TP, actions, dca/breakeven/partialTps — `enabled:false` turns a capability off; omitted fields fall back to built-in defaults). Creates a new version. Global server only |
 | `createBot` | Create a webhook bot (requires `exchangeAccountId`; optional `password` ≥ 12 chars = shared webhook secret + MCP token; creates a dedicated webhook endpoint and per-bot MCP) |
 | `resumeBot` / `pauseBot` | Activate / pause a bot |
 | `deleteBot` | Hard-delete a bot (endpoint, runs, versions) |
@@ -881,7 +884,7 @@ curl -s -X POST https://<host>/api/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"1.0"}}}'
 ```
 
-Then `tools/list` (returns all 23 specs), then `tools/call`:
+Then `tools/list` (returns all 24 specs), then `tools/call`:
 
 ```json
 { "jsonrpc": "2.0", "id": 2, "method": "tools/call",

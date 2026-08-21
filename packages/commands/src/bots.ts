@@ -12,7 +12,7 @@ import { getSettings, requireTradingEnabled } from './settings.js';
 import { executeOrderNow, persistOrder, type ExecuteResult } from './execute.js';
 import { loadPolicy } from './orders.js';
 import { queueNotification } from './notifications.js';
-import { manageBotPositions, mergeManagementOverrides, type ManageResult } from './manage.js';
+import { manageBotPositions, mergeManagementOverrides, resolveManagementConfig, type ManageResult } from './manage.js';
 import type { ManagementOverrides } from '@platform/contracts';
 
 export type CreateBotInput = { name: string; exchangeAccountId: string; config: unknown; password?: string };
@@ -213,7 +213,7 @@ export async function runBotEvaluation(bot: Bot, config: WebhookBotConfig, signa
     runMetrics.price = price ?? null;
     runMetrics.positionSide = currentPositionSide ?? null;
     let managed: ManageResult | undefined;
-    const effectiveConfig = mergeManagementOverrides(config, overrides);
+    const effectiveConfig = mergeManagementOverrides(resolveManagementConfig(config), overrides);
     if (effectiveConfig.dca?.enabled || effectiveConfig.breakeven?.enabled || effectiveConfig.partialTps?.enabled) {
       try {
         managed = await manageBotPositions(bot.id, overrides, { config: accountConfig, adapter: session.adapter, botConfig: config, marketType: botMarketType });

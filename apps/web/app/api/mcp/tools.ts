@@ -1,9 +1,10 @@
 import { z } from 'zod';
+import { BreakevenOverrideSchema, DcaOverrideSchema, PartialTpsOverrideSchema, type ManagementOverrides } from '@platform/contracts';
 import { type ExchangeAdapter } from '@platform/exchange-core';
 import {
   cancelOrderThroughBot, changeLeverageThroughBot, closeAllThroughBot, closePositionThroughBot, connectToAccount,
   createBot, getAccountConfig, getBotTradeContext, listExchangeAccounts, listExchangeMarkets, listLedgerPositions,
-  listOrders, loadPolicy, manageBotPositions, placeOrderThroughBot, realizedPnlInWindow, setBotStatus,
+  listOrders, loadPolicy, manageBotPositions, placeOrderThroughBot, realizedPnlInWindow, setBotStatus, updateBotConfig,
 } from '@platform/commands';
 import { prisma } from '@platform/database';
 import { McpToolError } from './mcp-error';
@@ -17,7 +18,7 @@ export type ToolSpec = {
   handler: (args: Record<string, unknown>, ctx: ToolContext) => Promise<Record<string, unknown>>;
 };
 
-const BOT_SPECS_EXCLUDED = new Set(['listAccounts', 'createBot', 'deleteBot']);
+const BOT_SPECS_EXCLUDED = new Set(['listAccounts', 'createBot', 'deleteBot', 'updateBotConfig']);
 
 async function withAccount<T>(fn: (adapter: ExchangeAdapter) => Promise<T>, accountId?: string): Promise<T> {
   const { adapter } = await connectToAccount(accountId);
@@ -321,12 +322,30 @@ export const toolSpecs: ToolSpec[] = [
   },
   {
     name: 'manageBot',
-    description: 'Run the bot position-management pass: DCA (average down), breakeven stop-loss move and partial take-profit claims for every open position on the bot account',
-    schema: { botId: z.string().min(1).max(64).optional() },
+    description: 'Run the bot position-management pass: DCA (average down), breakeven stop-loss move and partial take-profit claims for every open position on the bot account. Runs with the bot\'s saved config (built-in defaults when unconfigured); pass dca/breakeven/partialTps objects to override for this run only.',
+    schema: {
+      botId: z.string().min(1).max(64).optional(),
+      dca: z.unknown().optional(),
+      breakeven: z.unknown().optional(),
+      partialTps: z.unknown().optional(),
+    },
     async handler(args) {
       const botId = requireBotId(args);
-      const result = await manageBotPositions(botId);
+      const overrides: Partial<ManagementOverrides> = {};
+      if (args.dca !== undefined) overrides.dca = DcaOverrideSchema.parse(args.dca);
+      if (args.breakeven !== undefined) overrides.breakeven = BreakevenOverrideSchema.parse(args.breakeven);
+      if (args.partialTps !== undefined) overrides.partialTps = PartialTpsOverrideSchema.parse(args.partialTps);
+      const result = await manageBotPositions(botId, Object.keys(overrides).length > 0 ? overrides as ManagementOverrides : undefined);
       return { ok: true, botId, result };
+    },
+  },
+  {
+    name: 'updateBotConfig',
+    description: 'Replace a webhook bot\'s saved config (symbols, marketType SPOT|USDT_FUTURES, allocation, leverage, SL/TP, actions, dca/breakeven/partialTps — set enabled:false to turn a capability off; omit fields to use built-in defaults). Creates a new bot version.',
+    schema: { botId: z.string().min(1).max(64), config: z.unknown() },
+    async handler(args) {
+      const bot = await updateBotConfig({ botId: String(args.botId), config: args.config });
+      return { ok: true, botId: bot.id, name: bot.name, activeVersion: bot.activeVersion, config: bot.config };
     },
   },
   {
