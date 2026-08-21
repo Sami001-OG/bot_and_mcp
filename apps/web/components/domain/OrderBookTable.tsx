@@ -8,6 +8,7 @@ import { StatusBadge } from '../ui/StatusBadge';
 import { Table, Td, Th, TableScroll } from '../ui/Table';
 import { Tab, TabBar } from '../ui/Tabs';
 import { EmptyState } from '../ui/EmptyState';
+import { CopyButton } from '../ui/CopyButton';
 
 const ORDER_FILTERS: Array<{ id: 'SPOT' | 'USDT_FUTURES' | 'ALL'; label: string }> = [
   { id: 'ALL', label: 'All markets' },
@@ -81,24 +82,24 @@ export function OrderBookTable({ orders, loading, onCancel }: { orders: OrderRow
                 const fees = order.executions.reduce((sum, execution) => sum + Number(execution.fee), 0);
                 return (
                   <tr key={order.id}>
-                    <Td>{formatTime(order.createdAt)}</Td>
-                    <Td>
+                    <Td data-label="Time">{formatTime(order.createdAt)}</Td>
+                    <Td data-label="State">
                       <StatusBadge tone={STATE_TONES[order.state] ?? 'muted'}>{order.state}</StatusBadge>
                     </Td>
-                    <Td>
+                    <Td data-label="Side">
                       <span className={order.side === 'BUY' ? 'long' : 'short'}>{order.side}</span>
                       {order.positionSide !== 'BOTH' && <small className="muted block">{order.positionSide}</small>}
                     </Td>
-                    <Td>
+                    <Td data-label="Symbol">
                       <b>{order.symbol}</b>
                       <small className="muted block">{order.orderType}{order.reduceOnly ? ' — RO' : ''}</small>
                       <small className="muted block">{order.marketType === 'SPOT' ? 'Spot' : 'Futures'}</small>
                     </Td>
-                    <Td>{formatNumber(order.quantity)}</Td>
-                    <Td>{order.price ? formatNumber(order.price) : order.stopPrice ? `~${formatNumber(order.stopPrice)}` : '…'}</Td>
-                    <Td>{filled > 0 ? formatNumber(String(filled)) : '…'}</Td>
-                    <Td>{fees > 0 ? `${formatNumber(String(fees))} ${order.executions[0]?.feeAsset ?? ''}` : '…'}</Td>
-                    <Td>
+                    <Td data-label="Qty">{formatNumber(order.quantity)}</Td>
+                    <Td data-label="Price">{order.price ? formatNumber(order.price) : order.stopPrice ? `~${formatNumber(order.stopPrice)}` : '…'}</Td>
+                    <Td data-label="Fill">{filled > 0 ? formatNumber(String(filled)) : '…'}</Td>
+                    <Td data-label="Fee">{fees > 0 ? `${formatNumber(String(fees))} ${order.executions[0]?.feeAsset ?? ''}` : '…'}</Td>
+                    <Td data-label="Actions">
                       <div className="row-actions">
                         {!TERMINAL_STATES.has(order.state) && (
                           <button className="icon-btn danger" onClick={() => onCancel(order)} title="Cancel order" type="button">
@@ -114,6 +115,59 @@ export function OrderBookTable({ orders, loading, onCancel }: { orders: OrderRow
           </Table>
         )}
       </TableScroll>
+      {visibleOrders.length > 0 && (
+        <div className="mobile-cards">
+          {visibleOrders.map((order) => {
+            const filled = order.executions.reduce((sum, execution) => sum + Number(execution.quantity), 0);
+            const fees = order.executions.reduce((sum, execution) => sum + Number(execution.fee), 0);
+            return (
+              <div className="mc" key={order.id}>
+                <div className="mc-header">
+                  <strong>{order.symbol}</strong>
+                  <StatusBadge tone={STATE_TONES[order.state] ?? 'muted'}>{order.state}</StatusBadge>
+                </div>
+                <div className="mc-row">
+                  <span className="mc-label">Side</span>
+                  <span className={`mc-value ${order.side === 'BUY' ? 'long' : 'short'}`}>{order.side}{order.positionSide !== 'BOTH' ? ` ${order.positionSide}` : ''}</span>
+                </div>
+                <div className="mc-row">
+                  <span className="mc-label">Type</span>
+                  <span className="mc-value">{order.orderType}{order.reduceOnly ? ' — RO' : ''} · {order.marketType === 'SPOT' ? 'Spot' : 'Futures'}</span>
+                </div>
+                <div className="mc-row">
+                  <span className="mc-label">Qty</span>
+                  <span className="mc-value">{formatNumber(order.quantity)}</span>
+                </div>
+                <div className="mc-row">
+                  <span className="mc-label">Price</span>
+                  <span className="mc-value">{order.price ? formatNumber(order.price) : order.stopPrice ? `~${formatNumber(order.stopPrice)}` : '…'}</span>
+                </div>
+                {filled > 0 && (
+                  <div className="mc-row">
+                    <span className="mc-label">Filled</span>
+                    <span className="mc-value">{formatNumber(String(filled))}</span>
+                  </div>
+                )}
+                {fees > 0 && (
+                  <div className="mc-row">
+                    <span className="mc-label">Fee</span>
+                    <span className="mc-value">{formatNumber(String(fees))} {order.executions[0]?.feeAsset ?? ''}</span>
+                  </div>
+                )}
+                <div className="mc-row">
+                  <span className="mc-label">Time</span>
+                  <span className="mc-value">{formatTime(order.createdAt)}</span>
+                </div>
+                {!TERMINAL_STATES.has(order.state) && (
+                  <div className="mc-actions">
+                    <button className="danger" onClick={() => onCancel(order)} type="button">Cancel</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -146,25 +146,40 @@ function DashboardBody() {
                 <tbody>
                   {pnl.positions.map((position) => (
                     <tr key={`${position.symbol}:${position.side}`}>
-                      <Td>
-                        <b>{position.symbol}</b>
-                      </Td>
-                      <Td>
-                        <StatusBadge tone={position.side === 'SHORT' ? 'bad' : 'ok'}>{position.side}</StatusBadge>
-                      </Td>
-                      <Td>{formatNumber(position.quantity)}</Td>
-                      <Td>{formatNumber(position.averageEntryPrice, 6)}</Td>
-                      <Td>{formatNumber(position.markPrice, 6)}</Td>
-                      <Td className={pnlClass(position.realizedPnl)}>{formatPnl(position.realizedPnl)}</Td>
-                      <Td className={pnlClass(position.unrealizedPnl)}>{formatPnl(position.unrealizedPnl)}</Td>
-                      <Td>{position.leverage}x</Td>
-                      <Td className="muted">{position.marginMode}</Td>
+                      <Td data-label="Symbol"><b>{position.symbol}</b></Td>
+                      <Td data-label="Side"><StatusBadge tone={position.side === 'SHORT' ? 'bad' : 'ok'}>{position.side}</StatusBadge></Td>
+                      <Td data-label="Qty">{formatNumber(position.quantity)}</Td>
+                      <Td data-label="Entry">{formatNumber(position.averageEntryPrice, 6)}</Td>
+                      <Td data-label="Mark">{formatNumber(position.markPrice, 6)}</Td>
+                      <Td data-label="Realized" className={pnlClass(position.realizedPnl)}>{formatPnl(position.realizedPnl)}</Td>
+                      <Td data-label="Unrealized" className={pnlClass(position.unrealizedPnl)}>{formatPnl(position.unrealizedPnl)}</Td>
+                      <Td data-label="Lev">{position.leverage}x</Td>
+                      <Td data-label="Margin" className="muted">{position.marginMode}</Td>
                     </tr>
                   ))}
                 </tbody>
               </Table>
             )}
           </TableScroll>
+          {pnl && pnl.positions.length > 0 && (
+            <div className="mobile-cards">
+              {pnl.positions.map((position) => (
+                <div className="mc" key={`${position.symbol}:${position.side}`}>
+                  <div className="mc-header">
+                    <strong>{position.symbol}</strong>
+                    <StatusBadge tone={position.side === 'SHORT' ? 'bad' : 'ok'}>{position.side}</StatusBadge>
+                  </div>
+                  <div className="mc-row"><span className="mc-label">Qty</span><span className="mc-value">{formatNumber(position.quantity)}</span></div>
+                  <div className="mc-row"><span className="mc-label">Entry</span><span className="mc-value">{formatNumber(position.averageEntryPrice, 6)}</span></div>
+                  <div className="mc-row"><span className="mc-label">Mark</span><span className="mc-value">{formatNumber(position.markPrice, 6)}</span></div>
+                  <div className="mc-row"><span className="mc-label">Realized</span><span className={`mc-value ${pnlClass(position.realizedPnl)}`}>{formatPnl(position.realizedPnl)}</span></div>
+                  <div className="mc-row"><span className="mc-label">Unrealized</span><span className={`mc-value ${pnlClass(position.unrealizedPnl)}`}>{formatPnl(position.unrealizedPnl)}</span></div>
+                  <div className="mc-row"><span className="mc-label">Lev</span><span className="mc-value">{position.leverage}x</span></div>
+                  <div className="mc-row"><span className="mc-label">Margin</span><span className="mc-value muted">{position.marginMode}</span></div>
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
 
         <Card>
@@ -202,26 +217,40 @@ function DashboardBody() {
               <tbody>
                 {executions.map((row) => (
                   <tr key={`${row.orderId}-${row.executionId ?? 'nofill'}`}>
-                    <Td>{formatTime(row.executedAt ?? row.createdAt)}</Td>
-                    <Td>
-                      <StatusBadge tone={STATE_TONES[row.state] ?? 'muted'}>{row.state}</StatusBadge>
-                    </Td>
-                    <Td>
+                    <Td data-label="Time">{formatTime(row.executedAt ?? row.createdAt)}</Td>
+                    <Td data-label="State"><StatusBadge tone={STATE_TONES[row.state] ?? 'muted'}>{row.state}</StatusBadge></Td>
+                    <Td data-label="Side">
                       <span className={row.side === 'BUY' ? 'long' : 'short'}>{row.side}</span>
                       {row.positionSide !== 'BOTH' && <small className="muted block">{row.positionSide}</small>}
                     </Td>
-                    <Td>
+                    <Td data-label="Symbol">
                       <b>{row.symbol}</b>
                       {row.marketType && <small className="muted block">{row.marketType === 'SPOT' ? 'Spot' : 'Futures'}</small>}
                     </Td>
-                    <Td>{formatNumber(row.quantity)}</Td>
-                    <Td>{row.price ? formatNumber(row.price, 6) : '…'}</Td>
-                    <Td>{row.fee ? `${formatNumber(row.fee, 6)} ${row.feeAsset ?? ''}` : '…'}</Td>
+                    <Td data-label="Qty">{formatNumber(row.quantity)}</Td>
+                    <Td data-label="Price">{row.price ? formatNumber(row.price, 6) : '…'}</Td>
+                    <Td data-label="Fee">{row.fee ? `${formatNumber(row.fee, 6)} ${row.feeAsset ?? ''}` : '…'}</Td>
                   </tr>
                 ))}
               </tbody>
             </Table>
           </TableScroll>
+          <div className="mobile-cards">
+            {executions.map((row) => (
+              <div className="mc" key={`${row.orderId}-${row.executionId ?? 'nofill'}`}>
+                <div className="mc-header">
+                  <strong>{row.symbol}</strong>
+                  <StatusBadge tone={STATE_TONES[row.state] ?? 'muted'}>{row.state}</StatusBadge>
+                </div>
+                <div className="mc-row"><span className="mc-label">Side</span><span className={`mc-value ${row.side === 'BUY' ? 'long' : 'short'}`}>{row.side}{row.positionSide !== 'BOTH' ? ` ${row.positionSide}` : ''}</span></div>
+                <div className="mc-row"><span className="mc-label">Type</span><span className="mc-value">{row.marketType === 'SPOT' ? 'Spot' : 'Futures'}</span></div>
+                <div className="mc-row"><span className="mc-label">Qty</span><span className="mc-value">{formatNumber(row.quantity)}</span></div>
+                <div className="mc-row"><span className="mc-label">Price</span><span className="mc-value">{row.price ? formatNumber(row.price, 6) : '…'}</span></div>
+                {row.fee ? <div className="mc-row"><span className="mc-label">Fee</span><span className="mc-value">{formatNumber(row.fee, 6)} {row.feeAsset ?? ''}</span></div> : null}
+                <div className="mc-row"><span className="mc-label">Time</span><span className="mc-value">{formatTime(row.executedAt ?? row.createdAt)}</span></div>
+              </div>
+            ))}
+          </div>
         </Card>
       )}
     </>

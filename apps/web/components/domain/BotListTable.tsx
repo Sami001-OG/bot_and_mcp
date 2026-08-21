@@ -70,11 +70,11 @@ export function BotListTable({
             <tbody>
               {bots.map((bot) => (
                 <tr className={selectedId === bot.id ? 'selected-row' : ''} key={bot.id} onClick={() => onSelect(bot.id)}>
-                  <Td>
+                  <Td data-label="Bot">
                     <b>{bot.name}</b>
                     <small className="muted block">{bot.type}{bot.exchangeAccount ? ` · ${bot.exchangeAccount.label ?? bot.exchangeAccount.exchange} ${bot.exchangeAccount.marketType}` : ''}</small>
                   </Td>
-                  <Td className="webhook-cell">
+                  <Td data-label="Webhook" className="webhook-cell">
                     {bot.webhook ? (
                       <button
                         className="wh-copy"
@@ -92,12 +92,12 @@ export function BotListTable({
                       <span className="muted">—</span>
                     )}
                   </Td>
-                  <Td>
+                  <Td data-label="Status">
                     <StatusBadge tone={STATUS_TONES[bot.status]}>{bot.status}</StatusBadge>
                   </Td>
-                  <Td>v{bot.activeVersion}</Td>
-                  <Td className="config-cell" title={formatConfig(bot.config)}>{formatConfig(bot.config)}</Td>
-                  <Td className="row-actions" onMouseDown={(event) => event.stopPropagation()}>
+                  <Td data-label="Version">v{bot.activeVersion}</Td>
+                  <Td data-label="Config" className="config-cell" title={formatConfig(bot.config)}>{formatConfig(bot.config)}</Td>
+                  <Td data-label="Actions" className="row-actions" onMouseDown={(event) => event.stopPropagation()}>
                     {bot.status !== 'ACTIVE' && <button className="icon-btn safe" onClick={() => onResume(bot)} title="Resume" type="button"><Play size={14} /></button>}
                     {bot.status === 'ACTIVE' && <button className="icon-btn" onClick={() => onPause(bot)} title="Pause" type="button"><Pause size={14} /></button>}
                     <button className="icon-btn" onClick={() => onEdit(bot)} title="Edit config" type="button"><Settings2 size={14} /></button>
@@ -110,6 +110,31 @@ export function BotListTable({
           </Table>
         )}
       </TableScroll>
+      {bots.length > 0 && (
+        <div className="mobile-cards">
+          {bots.map((bot) => (
+            <div className="mc" key={bot.id} onClick={() => onSelect(bot.id)}>
+              <div className="mc-header">
+                <strong>{bot.name}</strong>
+                <StatusBadge tone={STATUS_TONES[bot.status]}>{bot.status}</StatusBadge>
+              </div>
+              <div className="mc-row"><span className="mc-label">Type</span><span className="mc-value">{bot.type}{bot.exchangeAccount ? ` · ${bot.exchangeAccount.label ?? bot.exchangeAccount.exchange}` : ''}</span></div>
+              <div className="mc-row"><span className="mc-label">Version</span><span className="mc-value">v{bot.activeVersion}</span></div>
+              <div className="mc-row"><span className="mc-label">Config</span><span className="mc-value" title={formatConfig(bot.config)}>{formatConfig(bot.config)}</span></div>
+              {bot.webhook && (
+                <div className="mc-row"><span className="mc-label">Webhook</span><span className="mc-value"><code>/{bot.webhook.id.slice(0, 8)}</code></span></div>
+              )}
+              <div className="mc-actions" onMouseDown={(event) => event.stopPropagation()}>
+                {bot.status !== 'ACTIVE' && <button className="safe" onClick={() => onResume(bot)} type="button">Resume</button>}
+                {bot.status === 'ACTIVE' && <button onClick={() => onPause(bot)} type="button">Pause</button>}
+                <button onClick={() => onEdit(bot)} type="button">Edit</button>
+                {bot.status !== 'STOPPED' && <button className="danger" onClick={() => onStop(bot)} type="button">Stop</button>}
+                <button className="danger" onClick={() => onDelete(bot)} type="button">Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
